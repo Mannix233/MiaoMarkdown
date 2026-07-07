@@ -30,7 +30,16 @@ miao-md-print-debug-apk / app-debug.apk
 - BLE scan for Paperang/Miao devices
 - Connects to service `49535343-fe7d-4ae5-8fa9-9fafd205e455`
 - Writes to characteristic `49535343-8841-43f4-a8d4-ecbe34729bb3`
+- Classic Bluetooth SPP fallback for paired devices
 - Renders short text/Markdown-ish content to 384 px bitmap
 - Sends Paperang-style packets with CRC and feed command
 
 This is still a prototype and needs real-device APK testing.
+
+## Device test order
+
+1. Pair the printer in Android Bluetooth settings first.
+2. Open the APK and grant Bluetooth permissions.
+3. Try `Classic paired connect`.
+4. Press `Black stripe test`.
+5. If Classic fails, try `BLE scan/connect`, then `Black stripe test`.

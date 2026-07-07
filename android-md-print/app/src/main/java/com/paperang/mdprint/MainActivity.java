@@ -10,11 +10,12 @@ import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
+import android.bluetooth.BluetoothProfile;
+import android.bluetooth.BluetoothSocket;
 import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanResult;
 import android.content.Context;
-import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -24,13 +25,14 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
-import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayDeque;
@@ -38,36 +40,48 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Queue;
+import java.util.Set;
 import java.util.UUID;
-import java.util.zip.CRC32;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
-    private static final UUID SERVICE_UUID = UUID.fromString("49535343-fe7d-4ae5-8fa9-9fafd205e455");
-    private static final UUID WRITE_UUID = UUID.fromString("49535343-8841-43f4-a8d4-ecbe34729bb3");
-    private static final UUID NOTIFY_UUID = UUID.fromString("49535343-1e4d-4bd9-ba61-23c647249616");
+    private static final UUID PAPERANG_SERVICE_UUID = UUID.fromString("49535343-fe7d-4ae5-8fa9-9fafd205e455");
+    private static final UUID PAPERANG_WRITE_UUID = UUID.fromString("49535343-8841-43f4-a8d4-ecbe34729bb3");
+    private static final UUID PAPERANG_NOTIFY_UUID = UUID.fromString("49535343-1e4d-4bd9-ba61-23c647249616");
     private static final UUID CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
+    private static final UUID SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805f9b34fb");
+
     private static final int WIDTH_PX = 384;
     private static final int WIDTH_BYTES = 48;
     private static final int STANDARD_CRC_KEY = 0x35769521;
     private static final int SESSION_CRC_KEY = 0x06968634 ^ 0x002e696d;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private final Queue<byte[]> writeQueue = new ArrayDeque<>();
-    private boolean writing = false;
+    private final Queue<byte[]> bleWriteQueue = new ArrayDeque<>();
+    private final ExecutorService classicWriter = Executors.newSingleThreadExecutor();
+    private boolean bleWriting = false;
     private int crcKey = STANDARD_CRC_KEY;
-    private boolean crcKeySet = false;
 
     private EditText editor;
     private TextView status;
     private BluetoothGatt gatt;
-    private BluetoothGattCharacteristic writeCharacteristic;
+    private BluetoothGattCharacteristic bleWriteCharacteristic;
     private BluetoothLeScanner scanner;
+    private BluetoothSocket classicSocket;
+    private OutputStream classicOutput;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         buildUi();
         requestNeededPermissions();
+    }
+
+    @Override
+    protected void onDestroy() {
+        closeConnections();
+        super.onDestroy();
     }
 
     private void buildUi() {
@@ -85,27 +99,32 @@ public class MainActivity extends Activity {
         editor.setMinLines(8);
         editor.setGravity(android.view.Gravity.TOP);
         editor.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
-        editor.setText("题目给你什么 | 问你什么 | 你该用什么\n--- | --- | ---\n给 F(s) | 求原函数 f(t) | 拉氏反变换");
+        editor.setText("# Print test\n\nItem | Meaning | Action\n--- | --- | ---\nF(s) | Input transform | Inverse Laplace\n\nShort lines first.");
         root.addView(editor, new LinearLayout.LayoutParams(-1, 0, 1));
 
-        Button shortSample = new Button(this);
-        shortSample.setText("短样例");
-        shortSample.setOnClickListener(v -> editor.setText("云南我的家申报给房东方饭店第三方的个"));
-        root.addView(shortSample);
+        Button sample = new Button(this);
+        sample.setText("Short sample");
+        sample.setOnClickListener(v -> editor.setText("Paperang P1 native Android test\nLine 2\nLine 3"));
+        root.addView(sample);
 
-        Button connect = new Button(this);
-        connect.setText("扫描并连接 Paperang");
-        connect.setOnClickListener(v -> startScan());
-        root.addView(connect);
+        Button bleConnect = new Button(this);
+        bleConnect.setText("BLE scan/connect");
+        bleConnect.setOnClickListener(v -> startBleScan());
+        root.addView(bleConnect);
+
+        Button classicConnect = new Button(this);
+        classicConnect.setText("Classic paired connect");
+        classicConnect.setOnClickListener(v -> connectFirstPairedClassicDevice());
+        root.addView(classicConnect);
 
         Button stripe = new Button(this);
-        stripe.setText("黑条测试");
+        stripe.setText("Black stripe test");
         stripe.setOnClickListener(v -> printBlackStripe());
         root.addView(stripe);
 
         Button print = new Button(this);
-        print.setText("打印 Markdown");
-        print.setOnClickListener(v -> printMarkdown());
+        print.setText("Print text");
+        print.setOnClickListener(v -> printText());
         root.addView(print);
 
         status = new TextView(this);
@@ -113,22 +132,29 @@ public class MainActivity extends Activity {
         status.setTextColor(Color.rgb(40, 48, 48));
         ScrollView scroll = new ScrollView(this);
         scroll.addView(status);
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, 260));
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, 280));
 
         setContentView(root);
     }
 
     private void requestNeededPermissions() {
         if (Build.VERSION.SDK_INT >= 31) {
-            requestPermissions(new String[]{Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT}, 10);
+            requestPermissions(new String[]{
+                    Manifest.permission.BLUETOOTH_SCAN,
+                    Manifest.permission.BLUETOOTH_CONNECT
+            }, 10);
         } else {
             requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, 10);
         }
     }
 
-    private void startScan() {
+    private BluetoothAdapter bluetoothAdapter() {
         BluetoothManager manager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
-        BluetoothAdapter adapter = manager.getAdapter();
+        return manager == null ? null : manager.getAdapter();
+    }
+
+    private void startBleScan() {
+        BluetoothAdapter adapter = bluetoothAdapter();
         if (adapter == null || !adapter.isEnabled()) {
             log("Bluetooth is disabled.");
             return;
@@ -138,14 +164,18 @@ public class MainActivity extends Activity {
             log("No BLE scanner.");
             return;
         }
-        log("Scanning...");
-        scanner.startScan(scanCallback);
-        handler.postDelayed(() -> {
-            try {
-                scanner.stopScan(scanCallback);
-            } catch (Exception ignored) {
-            }
-        }, 12000);
+        log("BLE scanning...");
+        try {
+            scanner.startScan(scanCallback);
+            handler.postDelayed(() -> {
+                try {
+                    scanner.stopScan(scanCallback);
+                } catch (SecurityException ignored) {
+                }
+            }, 12000);
+        } catch (SecurityException e) {
+            log("BLE scan permission denied.");
+        }
     }
 
     private final ScanCallback scanCallback = new ScanCallback() {
@@ -153,85 +183,134 @@ public class MainActivity extends Activity {
         public void onScanResult(int callbackType, ScanResult result) {
             BluetoothDevice device = result.getDevice();
             String name = safeDeviceName(device);
-            if (name.toLowerCase(Locale.ROOT).contains("paperang") || name.toLowerCase(Locale.ROOT).contains("miao")) {
-                scanner.stopScan(this);
-                log("Found: " + name + " " + device.getAddress());
-                connectDevice(device);
+            if (isPaperangName(name)) {
+                try {
+                    scanner.stopScan(this);
+                } catch (SecurityException ignored) {
+                }
+                log("BLE found: " + name + " " + safeAddress(device));
+                connectBleDevice(device);
             }
         }
     };
 
-    private void connectDevice(BluetoothDevice device) {
+    private void connectBleDevice(BluetoothDevice device) {
+        closeClassic();
         if (gatt != null) {
             gatt.close();
+            gatt = null;
         }
-        log("Connecting...");
-        gatt = device.connectGatt(this, false, gattCallback);
+        log("BLE connecting...");
+        try {
+            gatt = device.connectGatt(this, false, gattCallback);
+        } catch (SecurityException e) {
+            log("BLE connect permission denied.");
+        }
     }
 
     private final BluetoothGattCallback gattCallback = new BluetoothGattCallback() {
         @Override
         public void onConnectionStateChange(BluetoothGatt g, int statusCode, int newState) {
-            if (newState == android.bluetooth.BluetoothProfile.STATE_CONNECTED) {
-                log("Connected. Discovering services...");
-                g.discoverServices();
+            if (newState == BluetoothProfile.STATE_CONNECTED) {
+                log("BLE connected. Discovering services...");
+                try {
+                    g.discoverServices();
+                } catch (SecurityException e) {
+                    log("BLE discover permission denied.");
+                }
             } else {
-                log("Disconnected: " + statusCode);
+                log("BLE disconnected: " + statusCode);
             }
         }
 
         @Override
         public void onServicesDiscovered(BluetoothGatt g, int statusCode) {
-            BluetoothGattService service = g.getService(SERVICE_UUID);
+            BluetoothGattService service = g.getService(PAPERANG_SERVICE_UUID);
             if (service == null) {
-                log("Paperang service not found.");
+                log("Paperang BLE service not found.");
                 return;
             }
-            writeCharacteristic = service.getCharacteristic(WRITE_UUID);
-            if (writeCharacteristic == null) {
-                log("Write characteristic not found.");
+            bleWriteCharacteristic = service.getCharacteristic(PAPERANG_WRITE_UUID);
+            if (bleWriteCharacteristic == null) {
+                log("BLE write characteristic not found.");
                 return;
             }
-            BluetoothGattCharacteristic notify = service.getCharacteristic(NOTIFY_UUID);
+            BluetoothGattCharacteristic notify = service.getCharacteristic(PAPERANG_NOTIFY_UUID);
             if (notify != null) {
-                g.setCharacteristicNotification(notify, true);
-                BluetoothGattDescriptor descriptor = notify.getDescriptor(CCCD_UUID);
-                if (descriptor != null) {
-                    descriptor.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
-                    g.writeDescriptor(descriptor);
+                try {
+                    g.setCharacteristicNotification(notify, true);
+                    BluetoothGattDescriptor descriptor = notify.getDescriptor(CCCD_UUID);
+                    if (descriptor != null) {
+                        descriptor.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+                        g.writeDescriptor(descriptor);
+                    }
+                } catch (SecurityException e) {
+                    log("BLE notify permission denied.");
                 }
             }
-            handler.postDelayed(thisActivity()::initializePrinter, 500);
+            handler.postDelayed(MainActivity.this::initializePrinter, 500);
         }
 
         @Override
         public void onCharacteristicWrite(BluetoothGatt g, BluetoothGattCharacteristic c, int statusCode) {
-            writing = false;
-            handler.postDelayed(MainActivity.this::drainQueue, 90);
+            bleWriting = false;
+            handler.postDelayed(MainActivity.this::drainBleQueue, 80);
         }
 
         @Override
         public void onCharacteristicChanged(BluetoothGatt g, BluetoothGattCharacteristic c) {
             byte[] value = c.getValue();
-            log("Notify cmd=" + (value.length > 1 ? (value[1] & 0xff) : -1));
+            int command = value.length > 1 ? value[1] & 0xff : -1;
+            log("BLE notify cmd=" + command);
         }
     };
 
-    private MainActivity thisActivity() {
-        return this;
+    private void connectFirstPairedClassicDevice() {
+        BluetoothAdapter adapter = bluetoothAdapter();
+        if (adapter == null || !adapter.isEnabled()) {
+            log("Bluetooth is disabled.");
+            return;
+        }
+        new Thread(() -> {
+            try {
+                Set<BluetoothDevice> paired = adapter.getBondedDevices();
+                BluetoothDevice target = null;
+                for (BluetoothDevice device : paired) {
+                    if (isPaperangName(safeDeviceName(device))) {
+                        target = device;
+                        break;
+                    }
+                }
+                if (target == null) {
+                    log("No paired Paperang/Miao device. Pair it in Android Bluetooth settings first.");
+                    return;
+                }
+                log("Classic connecting: " + safeDeviceName(target) + " " + safeAddress(target));
+                closeBle();
+                closeClassic();
+                classicSocket = target.createRfcommSocketToServiceRecord(SPP_UUID);
+                adapter.cancelDiscovery();
+                classicSocket.connect();
+                classicOutput = classicSocket.getOutputStream();
+                log("Classic connected.");
+                initializePrinter();
+            } catch (SecurityException e) {
+                log("Classic Bluetooth permission denied.");
+            } catch (IOException e) {
+                log("Classic connect failed: " + e.getMessage());
+                closeClassic();
+            }
+        }).start();
     }
 
     private void initializePrinter() {
         crcKey = STANDARD_CRC_KEY;
-        crcKeySet = false;
-        enqueuePacket(pack(24, int32le((SESSION_CRC_KEY ^ STANDARD_CRC_KEY)), 0));
+        sendRaw(pack(24, int32le(SESSION_CRC_KEY ^ STANDARD_CRC_KEY), 0));
         crcKey = SESSION_CRC_KEY;
-        crcKeySet = true;
-        enqueuePacket(pack(34, new byte[]{0}, 0));
-        enqueuePacket(pack(44, new byte[]{0}, 0));
-        enqueuePacket(pack(25, new byte[]{75}, 0));
+        sendRaw(pack(34, new byte[]{0}, 0));
+        sendRaw(pack(44, new byte[]{0}, 0));
+        sendRaw(pack(25, new byte[]{75}, 0));
         log("Printer initialized.");
-        drainQueue();
     }
 
     private void printBlackStripe() {
@@ -245,25 +324,24 @@ public class MainActivity extends Activity {
         sendImage(data);
     }
 
-    private void printMarkdown() {
+    private void printText() {
         if (!ready()) return;
         sendImage(renderText(editor.getText().toString()));
     }
 
     private void sendImage(byte[] image) {
-        enqueuePacket(pack(34, new byte[]{0}, 0));
-        enqueuePacket(pack(44, new byte[]{0}, 0));
+        sendRaw(pack(34, new byte[]{0}, 0));
+        sendRaw(pack(44, new byte[]{0}, 0));
         int packetId = 0;
         for (int offset = 0; offset < image.length; offset += WIDTH_BYTES) {
             int len = Math.min(WIDTH_BYTES, image.length - offset);
             byte[] chunk = new byte[len];
             System.arraycopy(image, offset, chunk, 0, len);
-            enqueuePacket(pack(0, chunk, packetId++));
+            sendRaw(pack(0, chunk, packetId++));
         }
-        enqueuePacket(pack(44, new byte[]{0}, 0));
-        enqueuePacket(pack(26, int16le(280), 0));
-        log("Queued bytes=" + image.length + " lines=" + (image.length / WIDTH_BYTES));
-        drainQueue();
+        sendRaw(pack(44, new byte[]{0}, 0));
+        sendRaw(pack(26, int16le(280), 0));
+        log("Queued image bytes=" + image.length + " lines=" + (image.length / WIDTH_BYTES));
     }
 
     private byte[] renderText(String text) {
@@ -276,7 +354,7 @@ public class MainActivity extends Activity {
         Bitmap bitmap = Bitmap.createBitmap(WIDTH_PX, height, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
         canvas.drawColor(Color.WHITE);
-        int y = 24;
+        int y = 28;
         for (String line : lines) {
             canvas.drawText(line, 16, y, paint);
             y += lineHeight;
@@ -298,7 +376,7 @@ public class MainActivity extends Activity {
                     current = next;
                 }
             }
-            if (current.length() > 0) lines.add(current);
+            lines.add(current.length() == 0 ? " " : current);
         }
         return lines.isEmpty() ? java.util.Collections.singletonList(" ") : lines;
     }
@@ -334,14 +412,7 @@ public class MainActivity extends Activity {
     }
 
     private int crc32(byte[] data) {
-        CRC32 crc = new CRC32();
-        crc.update(int32le(crcKey));
-        crc.reset();
-        return crc32WithSeed(data, crcKey);
-    }
-
-    private int crc32WithSeed(byte[] data, int seed) {
-        int crc = seed ^ 0xffffffff;
+        int crc = crcKey ^ 0xffffffff;
         for (byte b : data) {
             crc = CRC_TABLE[(crc ^ b) & 0xff] ^ (crc >>> 8);
         }
@@ -375,36 +446,101 @@ public class MainActivity extends Activity {
         };
     }
 
-    private void enqueuePacket(byte[] packet) {
-        writeQueue.add(packet);
+    private void sendRaw(byte[] packet) {
+        OutputStream output = classicOutput;
+        if (output != null) {
+            classicWriter.execute(() -> {
+                try {
+                    output.write(packet);
+                    output.flush();
+                    Thread.sleep(45);
+                } catch (IOException e) {
+                    log("Classic write failed: " + e.getMessage());
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            return;
+        }
+        bleWriteQueue.add(packet);
+        drainBleQueue();
     }
 
-    private void drainQueue() {
-        if (writing || writeQueue.isEmpty() || writeCharacteristic == null || gatt == null) return;
-        byte[] packet = writeQueue.poll();
-        writeCharacteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
-        writeCharacteristic.setValue(packet);
-        writing = true;
-        boolean ok = gatt.writeCharacteristic(writeCharacteristic);
-        if (!ok) {
-            writing = false;
-            log("writeCharacteristic returned false");
+    private void drainBleQueue() {
+        if (bleWriting || bleWriteQueue.isEmpty() || bleWriteCharacteristic == null || gatt == null) return;
+        byte[] packet = bleWriteQueue.poll();
+        try {
+            bleWriteCharacteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+            bleWriteCharacteristic.setValue(packet);
+            bleWriting = true;
+            boolean ok = gatt.writeCharacteristic(bleWriteCharacteristic);
+            if (!ok) {
+                bleWriting = false;
+                log("BLE writeCharacteristic returned false");
+            }
+        } catch (SecurityException e) {
+            bleWriting = false;
+            log("BLE write permission denied.");
         }
     }
 
     private boolean ready() {
-        if (gatt == null || writeCharacteristic == null) {
-            log("Connect first.");
-            return false;
+        if (classicOutput != null || bleWriteCharacteristic != null) {
+            return true;
         }
-        return true;
+        log("Connect with BLE or Classic first.");
+        return false;
+    }
+
+    private boolean isPaperangName(String name) {
+        String lower = name == null ? "" : name.toLowerCase(Locale.ROOT);
+        return lower.contains("paperang") || lower.contains("miao");
     }
 
     private String safeDeviceName(BluetoothDevice device) {
         try {
-            return device.getName() == null ? "" : device.getName();
+            String name = device.getName();
+            return name == null ? "" : name;
         } catch (SecurityException e) {
             return "";
+        }
+    }
+
+    private String safeAddress(BluetoothDevice device) {
+        try {
+            return device.getAddress();
+        } catch (SecurityException e) {
+            return "";
+        }
+    }
+
+    private void closeConnections() {
+        closeBle();
+        closeClassic();
+        classicWriter.shutdownNow();
+    }
+
+    private void closeBle() {
+        if (gatt != null) {
+            try {
+                gatt.close();
+            } catch (Exception ignored) {
+            }
+            gatt = null;
+            bleWriteCharacteristic = null;
+            bleWriteQueue.clear();
+            bleWriting = false;
+        }
+    }
+
+    private void closeClassic() {
+        classicOutput = null;
+        if (classicSocket != null) {
+            try {
+                classicSocket.close();
+            } catch (IOException ignored) {
+            }
+            classicSocket = null;
         }
     }
 
