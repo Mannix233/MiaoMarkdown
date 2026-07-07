@@ -28,9 +28,11 @@ import android.os.Looper;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
+import android.util.TypedValue;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -62,6 +64,11 @@ public class MainActivity extends Activity {
 
     private static final int WIDTH_PX = 384;
     private static final int WIDTH_BYTES = 48;
+    private static final int PAPER_PADDING_PX = 22;
+    private static final float DEFAULT_CONTENT_TEXT_PX = 19f;
+    private static final float ADVANCE_MM_PER_PX = 0.1217f;
+    private static final int MIN_PRINT_HEIGHT_PX = 165;
+    private static final int MAX_PRINT_HEIGHT_PX = 12000;
     private static final int STANDARD_CRC_KEY = 0x35769521;
     private static final int SESSION_CRC_KEY = 0x06968634 ^ 0x002e696d;
 
@@ -75,9 +82,12 @@ public class MainActivity extends Activity {
     private TextView preview;
     private TextView connectionStatus;
     private TextView routeStatus;
+    private TextView estimateStatus;
+    private TextView fontStatus;
     private TextView status;
     private ScrollView editorPanel;
     private ScrollView previewPanel;
+    private HorizontalScrollView previewScroller;
     private Button editTab;
     private Button previewTab;
     private BluetoothGatt gatt;
@@ -86,6 +96,7 @@ public class MainActivity extends Activity {
     private BluetoothSocket classicSocket;
     private OutputStream classicOutput;
     private Markwon markwon;
+    private float contentTextPx = DEFAULT_CONTENT_TEXT_PX;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -108,8 +119,8 @@ public class MainActivity extends Activity {
 
         LinearLayout header = panel(Color.rgb(22, 31, 29), 0);
         header.setPadding(20, 18, 20, 18);
-        TextView title = label("Miao MD Print", 24, Color.WHITE, true);
-        TextView subtitle = label("Paperang P1 markdown printer", 13, Color.rgb(180, 197, 190), false);
+        TextView title = label("喵喵 Markdown 打印", 24, Color.WHITE, true);
+        TextView subtitle = label("Paperang P1 · 384px 点阵纸带预览", 13, Color.rgb(180, 197, 190), false);
         header.addView(title);
         header.addView(subtitle);
         root.addView(header, new LinearLayout.LayoutParams(-1, -2));
@@ -117,18 +128,36 @@ public class MainActivity extends Activity {
         LinearLayout statusRow = new LinearLayout(this);
         statusRow.setOrientation(LinearLayout.HORIZONTAL);
         statusRow.setPadding(0, 12, 0, 10);
-        connectionStatus = chip("Not connected", Color.rgb(255, 255, 255), Color.rgb(31, 44, 41));
-        routeStatus = chip("Route: none", Color.rgb(213, 231, 223), Color.rgb(31, 44, 41));
+        connectionStatus = chip("未连接", Color.rgb(255, 255, 255), Color.rgb(31, 44, 41));
+        routeStatus = chip("通道：无", Color.rgb(213, 231, 223), Color.rgb(31, 44, 41));
         statusRow.addView(connectionStatus, new LinearLayout.LayoutParams(0, -2, 1));
         LinearLayout.LayoutParams routeParams = new LinearLayout.LayoutParams(0, -2, 1);
         routeParams.setMargins(10, 0, 0, 0);
         statusRow.addView(routeStatus, routeParams);
         root.addView(statusRow);
 
+        estimateStatus = chip("纸宽 384px · 高度待计算 · 0.1217mm/px", Color.rgb(255, 251, 235), Color.rgb(62, 49, 25));
+        root.addView(estimateStatus, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout sizeRow = new LinearLayout(this);
+        sizeRow.setOrientation(LinearLayout.HORIZONTAL);
+        sizeRow.setPadding(0, 8, 0, 0);
+        Button smaller = actionButton("字号 -");
+        smaller.setOnClickListener(v -> adjustTextSize(-1f));
+        fontStatus = chip("字号 19px", Color.rgb(255, 255, 255), Color.rgb(31, 44, 41));
+        Button larger = actionButton("字号 +");
+        larger.setOnClickListener(v -> adjustTextSize(1f));
+        sizeRow.addView(smaller, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams fontParams = new LinearLayout.LayoutParams(0, -2, 1);
+        fontParams.setMargins(8, 0, 0, 0);
+        sizeRow.addView(fontStatus, fontParams);
+        addRowButton(sizeRow, larger);
+        root.addView(sizeRow);
+
         LinearLayout tabs = new LinearLayout(this);
         tabs.setOrientation(LinearLayout.HORIZONTAL);
-        editTab = actionButton("Edit");
-        previewTab = actionButton("Preview");
+        editTab = actionButton("编辑");
+        previewTab = actionButton("预览");
         editTab.setOnClickListener(v -> showEditor());
         previewTab.setOnClickListener(v -> showPreview());
         tabs.addView(editTab, new LinearLayout.LayoutParams(0, -2, 1));
@@ -138,7 +167,7 @@ public class MainActivity extends Activity {
         root.addView(tabs);
 
         editor = new EditText(this);
-        editor.setTextSize(17);
+        editor.setTextSize(16);
         editor.setTextColor(Color.rgb(22, 31, 29));
         editor.setBackgroundColor(Color.WHITE);
         editor.setPadding(18, 18, 18, 18);
@@ -152,8 +181,10 @@ public class MainActivity extends Activity {
 
             @Override
             public void onTextChanged(CharSequence s, int start, int before, int count) {
-                if (previewPanel != null && previewPanel.getVisibility() == View.VISIBLE) {
+                if (previewScroller != null && previewScroller.getVisibility() == View.VISIBLE) {
                     updatePreview();
+                } else if (estimateStatus != null) {
+                    updateEstimate();
                 }
             }
 
@@ -167,30 +198,30 @@ public class MainActivity extends Activity {
         editorPanel.setBackground(cardBackground(Color.WHITE, Color.rgb(204, 214, 209), 8));
         editorPanel.addView(editor, new ScrollView.LayoutParams(-1, -2));
 
-        preview = new TextView(this);
-        preview.setTextColor(Color.BLACK);
-        preview.setTextSize(22);
-        preview.setPadding(18, 18, 18, 18);
-        preview.setLineSpacing(0, 1.05f);
-        preview.setBackgroundColor(Color.WHITE);
+        preview = createPaperView();
         previewPanel = new ScrollView(this);
         previewPanel.setFillViewport(true);
-        previewPanel.setBackground(cardBackground(Color.WHITE, Color.rgb(204, 214, 209), 8));
-        previewPanel.addView(preview, new ScrollView.LayoutParams(-1, -2));
-        previewPanel.setVisibility(View.GONE);
+        previewPanel.setBackgroundColor(Color.rgb(224, 230, 226));
+        previewPanel.setPadding(18, 18, 18, 28);
+        previewPanel.addView(preview, new ScrollView.LayoutParams(WIDTH_PX, -2));
+        previewScroller = new HorizontalScrollView(this);
+        previewScroller.setFillViewport(false);
+        previewScroller.setBackground(cardBackground(Color.rgb(224, 230, 226), Color.rgb(184, 196, 190), 8));
+        previewScroller.addView(previewPanel, new HorizontalScrollView.LayoutParams(-2, -1));
+        previewScroller.setVisibility(View.GONE);
 
         LinearLayout.LayoutParams editorParams = new LinearLayout.LayoutParams(-1, 0, 1);
         editorParams.setMargins(0, 10, 0, 10);
         root.addView(editorPanel, editorParams);
         LinearLayout.LayoutParams previewParams = new LinearLayout.LayoutParams(-1, 0, 1);
         previewParams.setMargins(0, 10, 0, 10);
-        root.addView(previewPanel, previewParams);
+        root.addView(previewScroller, previewParams);
 
         LinearLayout sampleRow = new LinearLayout(this);
         sampleRow.setOrientation(LinearLayout.HORIZONTAL);
-        Button sample = actionButton("Sample");
-        sample.setOnClickListener(v -> editor.setText("# Paperang P1\n\n- Native Android print\n- Markdown rendering\n\nName | Result\n--- | ---\nBlack stripe | OK\nText | OK"));
-        Button classicConnect = actionButton("Classic");
+        Button sample = actionButton("示例");
+        sample.setOnClickListener(v -> editor.setText("# Paperang P1\n\n- 原生安卓打印\n- Markdown 预览与纸上输出统一\n\n项目 | 结果\n--- | ---\n黑条 | OK\n文字 | OK\n\n`paperang` 应该是一行内正常长度。"));
+        Button classicConnect = actionButton("经典蓝牙");
         classicConnect.setOnClickListener(v -> connectFirstPairedClassicDevice());
         Button bleConnect = actionButton("BLE");
         bleConnect.setOnClickListener(v -> startBleScan());
@@ -201,9 +232,9 @@ public class MainActivity extends Activity {
 
         LinearLayout printRow = new LinearLayout(this);
         printRow.setOrientation(LinearLayout.HORIZONTAL);
-        Button stripe = primaryButton("Black stripe");
+        Button stripe = primaryButton("黑条测试");
         stripe.setOnClickListener(v -> printBlackStripe());
-        Button print = primaryButton("Print Markdown");
+        Button print = primaryButton("打印 Markdown");
         print.setOnClickListener(v -> printMarkdown());
         printRow.addView(stripe, new LinearLayout.LayoutParams(0, -2, 1));
         addRowButton(printRow, print);
@@ -247,12 +278,18 @@ public class MainActivity extends Activity {
         button.setText(text);
         button.setTextSize(13);
         button.setAllCaps(false);
+        button.setTextColor(Color.rgb(23, 34, 31));
+        button.setBackground(cardBackground(Color.rgb(246, 248, 246), Color.rgb(177, 191, 184), 8));
+        button.setPadding(8, 8, 8, 8);
         return button;
     }
 
     private Button primaryButton(String text) {
         Button button = actionButton(text);
         button.setTextSize(14);
+        button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        button.setTextColor(Color.WHITE);
+        button.setBackground(cardBackground(Color.rgb(29, 88, 74), Color.rgb(29, 88, 74), 8));
         return button;
     }
 
@@ -281,21 +318,44 @@ public class MainActivity extends Activity {
 
     private void showEditor() {
         editorPanel.setVisibility(View.VISIBLE);
-        previewPanel.setVisibility(View.GONE);
+        previewScroller.setVisibility(View.GONE);
         editTab.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         previewTab.setTypeface(Typeface.DEFAULT, Typeface.NORMAL);
+        editTab.setBackground(cardBackground(Color.rgb(29, 88, 74), Color.rgb(29, 88, 74), 8));
+        editTab.setTextColor(Color.WHITE);
+        previewTab.setBackground(cardBackground(Color.rgb(246, 248, 246), Color.rgb(177, 191, 184), 8));
+        previewTab.setTextColor(Color.rgb(23, 34, 31));
+        updateEstimate();
     }
 
     private void showPreview() {
         updatePreview();
         editorPanel.setVisibility(View.GONE);
-        previewPanel.setVisibility(View.VISIBLE);
+        previewScroller.setVisibility(View.VISIBLE);
         editTab.setTypeface(Typeface.DEFAULT, Typeface.NORMAL);
         previewTab.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        editTab.setBackground(cardBackground(Color.rgb(246, 248, 246), Color.rgb(177, 191, 184), 8));
+        editTab.setTextColor(Color.rgb(23, 34, 31));
+        previewTab.setBackground(cardBackground(Color.rgb(29, 88, 74), Color.rgb(29, 88, 74), 8));
+        previewTab.setTextColor(Color.WHITE);
     }
 
     private void updatePreview() {
         markdownRenderer().setMarkdown(preview, editor.getText().toString());
+        updateEstimate(measurePaperView(preview));
+    }
+
+    private void adjustTextSize(float deltaPx) {
+        contentTextPx = Math.max(12f, Math.min(28f, contentTextPx + deltaPx));
+        if (fontStatus != null) {
+            fontStatus.setText("字号 " + Math.round(contentTextPx) + "px");
+        }
+        preview.setTextSize(TypedValue.COMPLEX_UNIT_PX, contentTextPx);
+        if (previewScroller.getVisibility() == View.VISIBLE) {
+            updatePreview();
+        } else {
+            updateEstimate();
+        }
     }
 
     private void requestNeededPermissions() {
@@ -317,16 +377,16 @@ public class MainActivity extends Activity {
     private void startBleScan() {
         BluetoothAdapter adapter = bluetoothAdapter();
         if (adapter == null || !adapter.isEnabled()) {
-            log("Bluetooth is disabled.");
+            log("蓝牙未开启。");
             return;
         }
         scanner = adapter.getBluetoothLeScanner();
         if (scanner == null) {
-            log("No BLE scanner.");
+            log("没有可用的 BLE 扫描器。");
             return;
         }
-        setDeviceStatus("Scanning BLE", "Route: BLE 8841");
-        log("BLE scanning...");
+        setDeviceStatus("正在扫描 BLE", "通道：BLE 8841");
+        log("正在扫描 BLE...");
         try {
             scanner.startScan(scanCallback);
             handler.postDelayed(() -> {
@@ -336,7 +396,7 @@ public class MainActivity extends Activity {
                 }
             }, 12000);
         } catch (SecurityException e) {
-            log("BLE scan permission denied.");
+            log("BLE 扫描权限被拒绝。");
         }
     }
 
@@ -350,8 +410,8 @@ public class MainActivity extends Activity {
                     scanner.stopScan(this);
                 } catch (SecurityException ignored) {
                 }
-                log("BLE found: " + name + " " + safeAddress(device));
-                setDeviceStatus("BLE found: " + safeLabel(name), "Route: BLE 8841");
+                log("找到 BLE 设备：" + name + " " + safeAddress(device));
+                setDeviceStatus("找到：" + safeLabel(name), "通道：BLE 8841");
                 connectBleDevice(device);
             }
         }
@@ -363,12 +423,12 @@ public class MainActivity extends Activity {
             gatt.close();
             gatt = null;
         }
-        log("BLE connecting...");
-        setDeviceStatus("BLE connecting", "Route: BLE 8841");
+        log("正在连接 BLE...");
+        setDeviceStatus("BLE 连接中", "通道：BLE 8841");
         try {
             gatt = device.connectGatt(this, false, gattCallback);
         } catch (SecurityException e) {
-            log("BLE connect permission denied.");
+            log("BLE 连接权限被拒绝。");
         }
     }
 
@@ -376,16 +436,16 @@ public class MainActivity extends Activity {
         @Override
         public void onConnectionStateChange(BluetoothGatt g, int statusCode, int newState) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                log("BLE connected. Discovering services...");
-                setDeviceStatus("BLE connected", "Route: BLE 8841");
+                log("BLE 已连接，正在发现服务...");
+                setDeviceStatus("BLE 已连接", "通道：BLE 8841");
                 try {
                     g.discoverServices();
                 } catch (SecurityException e) {
-                    log("BLE discover permission denied.");
+                    log("BLE 服务发现权限被拒绝。");
                 }
             } else {
-                log("BLE disconnected: " + statusCode);
-                setDeviceStatus("BLE disconnected", "Route: none");
+                log("BLE 已断开：" + statusCode);
+                setDeviceStatus("BLE 已断开", "通道：无");
             }
         }
 
@@ -393,15 +453,15 @@ public class MainActivity extends Activity {
         public void onServicesDiscovered(BluetoothGatt g, int statusCode) {
             BluetoothGattService service = g.getService(PAPERANG_SERVICE_UUID);
             if (service == null) {
-                log("Paperang BLE service not found.");
+                log("没有找到 Paperang BLE 服务。");
                 return;
             }
             bleWriteCharacteristic = service.getCharacteristic(PAPERANG_WRITE_UUID);
             if (bleWriteCharacteristic == null) {
-                log("BLE write characteristic not found.");
+                log("没有找到 BLE 写入特征。");
                 return;
             }
-            setDeviceStatus("BLE ready", "Write: 8841");
+            setDeviceStatus("BLE 就绪", "写入：8841");
             BluetoothGattCharacteristic notify = service.getCharacteristic(PAPERANG_NOTIFY_UUID);
             if (notify != null) {
                 try {
@@ -412,7 +472,7 @@ public class MainActivity extends Activity {
                         g.writeDescriptor(descriptor);
                     }
                 } catch (SecurityException e) {
-                    log("BLE notify permission denied.");
+                    log("BLE 通知权限被拒绝。");
                 }
             }
             handler.postDelayed(MainActivity.this::initializePrinter, 500);
@@ -428,14 +488,14 @@ public class MainActivity extends Activity {
         public void onCharacteristicChanged(BluetoothGatt g, BluetoothGattCharacteristic c) {
             byte[] value = c.getValue();
             int command = value.length > 1 ? value[1] & 0xff : -1;
-            log("BLE notify cmd=" + command);
+            log("BLE 通知 cmd=" + command);
         }
     };
 
     private void connectFirstPairedClassicDevice() {
         BluetoothAdapter adapter = bluetoothAdapter();
         if (adapter == null || !adapter.isEnabled()) {
-            log("Bluetooth is disabled.");
+            log("蓝牙未开启。");
             return;
         }
         new Thread(() -> {
@@ -449,26 +509,26 @@ public class MainActivity extends Activity {
                     }
                 }
                 if (target == null) {
-                    log("No paired Paperang/Miao device. Pair it in Android Bluetooth settings first.");
-                    setDeviceStatus("No paired printer", "Route: none");
+                    log("没有已配对的 Paperang/喵喵机，请先在系统蓝牙里配对。");
+                    setDeviceStatus("未找到已配对打印机", "通道：无");
                     return;
                 }
-                log("Classic connecting: " + safeDeviceName(target) + " " + safeAddress(target));
-                setDeviceStatus("Classic connecting", "Route: SPP");
+                log("正在连接经典蓝牙：" + safeDeviceName(target) + " " + safeAddress(target));
+                setDeviceStatus("经典蓝牙连接中", "通道：SPP");
                 closeBle();
                 closeClassic();
                 classicSocket = target.createRfcommSocketToServiceRecord(SPP_UUID);
                 adapter.cancelDiscovery();
                 classicSocket.connect();
                 classicOutput = classicSocket.getOutputStream();
-                log("Classic connected.");
-                setDeviceStatus("Classic ready: " + safeLabel(safeDeviceName(target)), "Route: SPP");
+                log("经典蓝牙已连接。");
+                setDeviceStatus("经典蓝牙就绪：" + safeLabel(safeDeviceName(target)), "通道：SPP");
                 initializePrinter();
             } catch (SecurityException e) {
-                log("Classic Bluetooth permission denied.");
+                log("经典蓝牙权限被拒绝。");
             } catch (IOException e) {
-                log("Classic connect failed: " + e.getMessage());
-                setDeviceStatus("Classic failed", "Route: none");
+                log("经典蓝牙连接失败：" + e.getMessage());
+                setDeviceStatus("经典蓝牙失败", "通道：无");
                 closeClassic();
             }
         }).start();
@@ -481,7 +541,7 @@ public class MainActivity extends Activity {
         sendRaw(pack(34, new byte[]{0}, 0));
         sendRaw(pack(44, new byte[]{0}, 0));
         sendRaw(pack(25, new byte[]{75}, 0));
-        log("Printer initialized.");
+        log("打印机初始化完成。");
     }
 
     private void printBlackStripe() {
@@ -497,7 +557,10 @@ public class MainActivity extends Activity {
 
     private void printMarkdown() {
         if (!ready()) return;
-        sendImage(renderMarkdown(editor.getText().toString()));
+        RenderedPaper paper = renderMarkdown(editor.getText().toString());
+        updateEstimate(paper.heightPx);
+        log("打印预估：宽 384px，高 " + paper.heightPx + "px，约 " + formatMm(estimateLengthMm(paper.heightPx)) + "mm");
+        sendImage(paper.bytes);
     }
 
     private void sendImage(byte[] image) {
@@ -512,30 +575,78 @@ public class MainActivity extends Activity {
         }
         sendRaw(pack(44, new byte[]{0}, 0));
         sendRaw(pack(26, int16le(280), 0));
-        log("Queued image bytes=" + image.length + " lines=" + (image.length / WIDTH_BYTES));
+        int heightPx = image.length / WIDTH_BYTES;
+        log("已入队：宽 384px，高 " + heightPx + "px，数据 " + image.length + " bytes，预计 " + formatMm(estimateLengthMm(heightPx)) + "mm");
     }
 
-    private byte[] renderMarkdown(String markdown) {
-        TextView preview = new TextView(this);
-        preview.setTextColor(Color.BLACK);
-        preview.setTextSize(22);
-        preview.setIncludeFontPadding(true);
-        preview.setPadding(16, 16, 16, 16);
-        preview.setLineSpacing(0, 1.05f);
-        preview.setBackgroundColor(Color.WHITE);
-        markdownRenderer().setMarkdown(preview, markdown);
-
-        int widthSpec = View.MeasureSpec.makeMeasureSpec(WIDTH_PX, View.MeasureSpec.EXACTLY);
-        int heightSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
-        preview.measure(widthSpec, heightSpec);
-        int height = Math.max(164, preview.getMeasuredHeight());
-        preview.layout(0, 0, WIDTH_PX, height);
+    private RenderedPaper renderMarkdown(String markdown) {
+        TextView paper = createPaperView();
+        markdownRenderer().setMarkdown(paper, markdown);
+        int height = measurePaperView(paper);
+        if (height > MAX_PRINT_HEIGHT_PX) {
+            height = MAX_PRINT_HEIGHT_PX;
+            log("内容超过最大渲染高度，已截到 " + MAX_PRINT_HEIGHT_PX + "px。");
+        }
 
         Bitmap bitmap = Bitmap.createBitmap(WIDTH_PX, height, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
         canvas.drawColor(Color.WHITE);
-        preview.draw(canvas);
-        return encodeBitmap(bitmap);
+        paper.draw(canvas);
+        return new RenderedPaper(encodeBitmap(bitmap), height);
+    }
+
+    private TextView createPaperView() {
+        TextView paper = new TextView(this);
+        paper.setTextColor(Color.BLACK);
+        paper.setTextSize(TypedValue.COMPLEX_UNIT_PX, contentTextPx);
+        paper.setIncludeFontPadding(true);
+        paper.setPadding(PAPER_PADDING_PX, PAPER_PADDING_PX, PAPER_PADDING_PX, PAPER_PADDING_PX);
+        paper.setLineSpacing(0, 1.05f);
+        paper.setBackgroundColor(Color.WHITE);
+        paper.setMinWidth(WIDTH_PX);
+        paper.setMaxWidth(WIDTH_PX);
+        paper.setWidth(WIDTH_PX);
+        return paper;
+    }
+
+    private int measurePaperView(TextView paper) {
+        int widthSpec = View.MeasureSpec.makeMeasureSpec(WIDTH_PX, View.MeasureSpec.EXACTLY);
+        int heightSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
+        paper.measure(widthSpec, heightSpec);
+        int height = Math.max(MIN_PRINT_HEIGHT_PX, paper.getMeasuredHeight());
+        paper.layout(0, 0, WIDTH_PX, height);
+        return height;
+    }
+
+    private void updateEstimate() {
+        TextView paper = createPaperView();
+        markdownRenderer().setMarkdown(paper, editor.getText().toString());
+        updateEstimate(measurePaperView(paper));
+    }
+
+    private void updateEstimate(int heightPx) {
+        if (estimateStatus != null) {
+            int dotRows = Math.max(1, heightPx);
+            estimateStatus.setText("384px · 高 " + heightPx + "px / " + dotRows + "行 · 约 " + formatMm(estimateLengthMm(heightPx)) + "mm · 0.1217mm/px");
+        }
+    }
+
+    private float estimateLengthMm(int heightPx) {
+        return Math.max(20f, heightPx * ADVANCE_MM_PER_PX);
+    }
+
+    private String formatMm(float value) {
+        return String.format(Locale.ROOT, "%.1f", value);
+    }
+
+    private static class RenderedPaper {
+        final byte[] bytes;
+        final int heightPx;
+
+        RenderedPaper(byte[] bytes, int heightPx) {
+            this.bytes = bytes;
+            this.heightPx = heightPx;
+        }
     }
 
     private Markwon markdownRenderer() {
@@ -657,7 +768,7 @@ public class MainActivity extends Activity {
         if (classicOutput != null || bleWriteCharacteristic != null) {
             return true;
         }
-        log("Connect with BLE or Classic first.");
+        log("请先连接经典蓝牙或 BLE。");
         return false;
     }
 

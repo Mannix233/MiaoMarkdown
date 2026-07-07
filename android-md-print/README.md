@@ -32,9 +32,21 @@ miao-md-print-debug-apk / app-debug.apk
 - Writes to characteristic `49535343-8841-43f4-a8d4-ecbe34729bb3`
 - Classic Bluetooth SPP fallback for paired devices
 - Renders Markdown with Markwon before converting the preview to a 384 px bitmap
-- Edit/Preview UI with connection and route status
+- Chinese Edit/Preview UI with connection, route, font size, and paper-length estimate
 - Supports CommonMark plus GFM tables, task lists, strikethrough, and basic HTML through Markwon plugins
 - Sends Paperang-style packets with CRC and feed command
+
+## Raster sizing
+
+The Android raster path follows the desktop Electron raster path:
+
+- Paper width: `384 px`
+- Default content font: `19 px`
+- Paper padding: `22 px`
+- Feed estimate: `height_px * 0.1217 mm`
+- Minimum estimate: `20 mm`
+
+The UI preview uses the same fixed-width paper view as printing, so phone screen density should not change printed font size.
 
 This is still a prototype and needs real-device APK testing.
 
