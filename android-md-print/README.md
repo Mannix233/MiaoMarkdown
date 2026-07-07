@@ -32,8 +32,10 @@ miao-md-print-debug-apk / app-debug.apk
 - Writes to characteristic `49535343-8841-43f4-a8d4-ecbe34729bb3`
 - Classic Bluetooth SPP fallback for paired devices
 - Renders Markdown with Markwon before converting the preview to a 384 px bitmap
-- Chinese Edit/Preview UI with connection, route, font size, density, post-print feed, and paper-length estimate
+- Chinese preview/print UI with a separate full-screen Markdown editor
+- Connection, route, font size, density, post-print feed, and paper-length estimate
 - Supports CommonMark plus GFM tables, task lists, strikethrough, and basic HTML through Markwon plugins
+- Table rendering uses black borders/white background and thermal-paper breakpoints for long table words
 - Sends Paperang-style packets with CRC and feed command
 
 ## Raster sizing

@@ -16,6 +16,7 @@ import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanResult;
 import android.content.Context;
+import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -52,10 +53,12 @@ import java.util.concurrent.Executors;
 import io.noties.markwon.Markwon;
 import io.noties.markwon.ext.strikethrough.StrikethroughPlugin;
 import io.noties.markwon.ext.tables.TablePlugin;
+import io.noties.markwon.ext.tables.TableTheme;
 import io.noties.markwon.ext.tasklist.TaskListPlugin;
 import io.noties.markwon.html.HtmlPlugin;
 
 public class MainActivity extends Activity {
+    private static final int EDIT_REQUEST = 1001;
     private static final UUID PAPERANG_SERVICE_UUID = UUID.fromString("49535343-fe7d-4ae5-8fa9-9fafd205e455");
     private static final UUID PAPERANG_WRITE_UUID = UUID.fromString("49535343-8841-43f4-a8d4-ecbe34729bb3");
     private static final UUID PAPERANG_NOTIFY_UUID = UUID.fromString("49535343-1e4d-4bd9-ba61-23c647249616");
@@ -196,9 +199,9 @@ public class MainActivity extends Activity {
 
         LinearLayout tabs = new LinearLayout(this);
         tabs.setOrientation(LinearLayout.HORIZONTAL);
-        editTab = actionButton("编辑");
+        editTab = actionButton("编辑全文");
         previewTab = actionButton("预览");
-        editTab.setOnClickListener(v -> showEditor());
+        editTab.setOnClickListener(v -> openEditorPage());
         previewTab.setOnClickListener(v -> showPreview());
         tabs.addView(editTab, new LinearLayout.LayoutParams(0, -2, 1));
         LinearLayout.LayoutParams previewTabParams = new LinearLayout.LayoutParams(0, -2, 1);
@@ -293,7 +296,7 @@ public class MainActivity extends Activity {
         root.addView(scroll, logParams);
 
         setContentView(root);
-        showEditor();
+        showPreview();
     }
 
     private TextView label(String text, int size, int color, boolean bold) {
@@ -358,22 +361,20 @@ public class MainActivity extends Activity {
     }
 
     private void showEditor() {
-        editorPanel.setVisibility(View.VISIBLE);
-        previewScroller.setVisibility(View.GONE);
-        editTab.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        previewTab.setTypeface(Typeface.DEFAULT, Typeface.NORMAL);
-        editTab.setBackground(cardBackground(Color.rgb(29, 88, 74), Color.rgb(29, 88, 74), 8));
-        editTab.setTextColor(Color.WHITE);
-        previewTab.setBackground(cardBackground(Color.rgb(246, 248, 246), Color.rgb(177, 191, 184), 8));
-        previewTab.setTextColor(Color.rgb(23, 34, 31));
-        updateEstimate();
+        openEditorPage();
+    }
+
+    private void openEditorPage() {
+        Intent intent = new Intent(this, EditorActivity.class);
+        intent.putExtra(EditorActivity.EXTRA_MARKDOWN, editor.getText().toString());
+        startActivityForResult(intent, EDIT_REQUEST);
     }
 
     private void showPreview() {
         updatePreview();
         editorPanel.setVisibility(View.GONE);
         previewScroller.setVisibility(View.VISIBLE);
-        editTab.setTypeface(Typeface.DEFAULT, Typeface.NORMAL);
+        editTab.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         previewTab.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         editTab.setBackground(cardBackground(Color.rgb(246, 248, 246), Color.rgb(177, 191, 184), 8));
         editTab.setTextColor(Color.rgb(23, 34, 31));
@@ -381,8 +382,17 @@ public class MainActivity extends Activity {
         previewTab.setTextColor(Color.WHITE);
     }
 
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == EDIT_REQUEST && data != null && data.hasExtra(EditorActivity.EXTRA_MARKDOWN)) {
+            editor.setText(data.getStringExtra(EditorActivity.EXTRA_MARKDOWN));
+            showPreview();
+        }
+    }
+
     private void updatePreview() {
-        markdownRenderer().setMarkdown(preview, editor.getText().toString());
+        markdownRenderer().setMarkdown(preview, prepareMarkdownForPaper(editor.getText().toString()));
         updateEstimate(measurePaperView(preview));
     }
 
@@ -640,7 +650,7 @@ public class MainActivity extends Activity {
 
     private RenderedPaper renderMarkdown(String markdown) {
         TextView paper = createPaperView();
-        markdownRenderer().setMarkdown(paper, markdown);
+        markdownRenderer().setMarkdown(paper, prepareMarkdownForPaper(markdown));
         int height = measurePaperView(paper);
         if (height > MAX_PRINT_HEIGHT_PX) {
             height = MAX_PRINT_HEIGHT_PX;
@@ -679,8 +689,41 @@ public class MainActivity extends Activity {
 
     private void updateEstimate() {
         TextView paper = createPaperView();
-        markdownRenderer().setMarkdown(paper, editor.getText().toString());
+        markdownRenderer().setMarkdown(paper, prepareMarkdownForPaper(editor.getText().toString()));
         updateEstimate(measurePaperView(paper));
+    }
+
+    private String prepareMarkdownForPaper(String markdown) {
+        String normalized = markdown.replace("\r\n", "\n");
+        String[] lines = normalized.split("\n", -1);
+        StringBuilder out = new StringBuilder(normalized.length() + 32);
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            out.append(line.indexOf('|') >= 0 ? addTableBreakpoints(line) : line);
+            if (i < lines.length - 1) {
+                out.append('\n');
+            }
+        }
+        return out.toString();
+    }
+
+    private String addTableBreakpoints(String line) {
+        StringBuilder out = new StringBuilder(line.length() + 8);
+        int run = 0;
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            boolean asciiWord = c < 128 && Character.isLetterOrDigit(c);
+            if (asciiWord) {
+                run++;
+                if (run > 0 && run % 10 == 0) {
+                    out.append('\u200B');
+                }
+            } else {
+                run = 0;
+            }
+            out.append(c);
+        }
+        return out.toString();
     }
 
     private void updateEstimate(int heightPx) {
@@ -714,8 +757,16 @@ public class MainActivity extends Activity {
 
     private Markwon markdownRenderer() {
         if (markwon == null) {
+            TableTheme tableTheme = TableTheme.builder()
+                    .tableBorderColor(Color.BLACK)
+                    .tableBorderWidth(2)
+                    .tableCellPadding(6)
+                    .tableHeaderRowBackgroundColor(Color.WHITE)
+                    .tableEvenRowBackgroundColor(Color.WHITE)
+                    .tableOddRowBackgroundColor(Color.WHITE)
+                    .build();
             markwon = Markwon.builder(this)
-                    .usePlugin(TablePlugin.create(this))
+                    .usePlugin(TablePlugin.create(tableTheme))
                     .usePlugin(TaskListPlugin.create(this))
                     .usePlugin(StrikethroughPlugin.create())
                     .usePlugin(HtmlPlugin.create())
