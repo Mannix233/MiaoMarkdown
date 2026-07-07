@@ -36,6 +36,8 @@ miao-md-print-debug-apk / app-debug.apk
 
 This is still a prototype and needs real-device APK testing.
 
+Last cloud-build trigger: 2026-07-07.
+
 ## Device test order
 
 1. Pair the printer in Android Bluetooth settings first.
