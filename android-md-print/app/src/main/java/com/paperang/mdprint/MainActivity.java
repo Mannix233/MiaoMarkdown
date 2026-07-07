@@ -19,12 +19,16 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.Paint;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.TextWatcher;
+import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -36,14 +40,18 @@ import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Locale;
 import java.util.Queue;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+
+import io.noties.markwon.Markwon;
+import io.noties.markwon.ext.strikethrough.StrikethroughPlugin;
+import io.noties.markwon.ext.tables.TablePlugin;
+import io.noties.markwon.ext.tasklist.TaskListPlugin;
+import io.noties.markwon.html.HtmlPlugin;
 
 public class MainActivity extends Activity {
     private static final UUID PAPERANG_SERVICE_UUID = UUID.fromString("49535343-fe7d-4ae5-8fa9-9fafd205e455");
@@ -64,12 +72,20 @@ public class MainActivity extends Activity {
     private int crcKey = STANDARD_CRC_KEY;
 
     private EditText editor;
+    private TextView preview;
+    private TextView connectionStatus;
+    private TextView routeStatus;
     private TextView status;
+    private ScrollView editorPanel;
+    private ScrollView previewPanel;
+    private Button editTab;
+    private Button previewTab;
     private BluetoothGatt gatt;
     private BluetoothGattCharacteristic bleWriteCharacteristic;
     private BluetoothLeScanner scanner;
     private BluetoothSocket classicSocket;
     private OutputStream classicOutput;
+    private Markwon markwon;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -87,54 +103,199 @@ public class MainActivity extends Activity {
     private void buildUi() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(28, 28, 28, 28);
+        root.setPadding(18, 18, 18, 18);
+        root.setBackgroundColor(Color.rgb(234, 239, 235));
 
-        TextView title = new TextView(this);
-        title.setText("Miao MD Print Android");
-        title.setTextSize(24);
-        title.setTextColor(Color.rgb(20, 24, 24));
-        root.addView(title);
+        LinearLayout header = panel(Color.rgb(22, 31, 29), 0);
+        header.setPadding(20, 18, 20, 18);
+        TextView title = label("Miao MD Print", 24, Color.WHITE, true);
+        TextView subtitle = label("Paperang P1 markdown printer", 13, Color.rgb(180, 197, 190), false);
+        header.addView(title);
+        header.addView(subtitle);
+        root.addView(header, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout statusRow = new LinearLayout(this);
+        statusRow.setOrientation(LinearLayout.HORIZONTAL);
+        statusRow.setPadding(0, 12, 0, 10);
+        connectionStatus = chip("Not connected", Color.rgb(255, 255, 255), Color.rgb(31, 44, 41));
+        routeStatus = chip("Route: none", Color.rgb(213, 231, 223), Color.rgb(31, 44, 41));
+        statusRow.addView(connectionStatus, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams routeParams = new LinearLayout.LayoutParams(0, -2, 1);
+        routeParams.setMargins(10, 0, 0, 0);
+        statusRow.addView(routeStatus, routeParams);
+        root.addView(statusRow);
+
+        LinearLayout tabs = new LinearLayout(this);
+        tabs.setOrientation(LinearLayout.HORIZONTAL);
+        editTab = actionButton("Edit");
+        previewTab = actionButton("Preview");
+        editTab.setOnClickListener(v -> showEditor());
+        previewTab.setOnClickListener(v -> showPreview());
+        tabs.addView(editTab, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams previewTabParams = new LinearLayout.LayoutParams(0, -2, 1);
+        previewTabParams.setMargins(8, 0, 0, 0);
+        tabs.addView(previewTab, previewTabParams);
+        root.addView(tabs);
 
         editor = new EditText(this);
-        editor.setMinLines(8);
+        editor.setTextSize(17);
+        editor.setTextColor(Color.rgb(22, 31, 29));
+        editor.setBackgroundColor(Color.WHITE);
+        editor.setPadding(18, 18, 18, 18);
         editor.setGravity(android.view.Gravity.TOP);
         editor.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
-        editor.setText("# Print test\n\nItem | Meaning | Action\n--- | --- | ---\nF(s) | Input transform | Inverse Laplace\n\nShort lines first.");
-        root.addView(editor, new LinearLayout.LayoutParams(-1, 0, 1));
+        editor.setText("# Print test\n\nItem | Meaning | Action\n--- | --- | ---\nF(s) | Input transform | Inverse Laplace\n\n- Short lines first\n- Markdown marks should disappear\n\n**Bold text** and `code`.");
+        editor.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+            }
 
-        Button sample = new Button(this);
-        sample.setText("Short sample");
-        sample.setOnClickListener(v -> editor.setText("Paperang P1 native Android test\nLine 2\nLine 3"));
-        root.addView(sample);
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+                if (previewPanel != null && previewPanel.getVisibility() == View.VISIBLE) {
+                    updatePreview();
+                }
+            }
 
-        Button bleConnect = new Button(this);
-        bleConnect.setText("BLE scan/connect");
-        bleConnect.setOnClickListener(v -> startBleScan());
-        root.addView(bleConnect);
+            @Override
+            public void afterTextChanged(Editable s) {
+            }
+        });
 
-        Button classicConnect = new Button(this);
-        classicConnect.setText("Classic paired connect");
+        editorPanel = new ScrollView(this);
+        editorPanel.setFillViewport(true);
+        editorPanel.setBackground(cardBackground(Color.WHITE, Color.rgb(204, 214, 209), 8));
+        editorPanel.addView(editor, new ScrollView.LayoutParams(-1, -2));
+
+        preview = new TextView(this);
+        preview.setTextColor(Color.BLACK);
+        preview.setTextSize(22);
+        preview.setPadding(18, 18, 18, 18);
+        preview.setLineSpacing(0, 1.05f);
+        preview.setBackgroundColor(Color.WHITE);
+        previewPanel = new ScrollView(this);
+        previewPanel.setFillViewport(true);
+        previewPanel.setBackground(cardBackground(Color.WHITE, Color.rgb(204, 214, 209), 8));
+        previewPanel.addView(preview, new ScrollView.LayoutParams(-1, -2));
+        previewPanel.setVisibility(View.GONE);
+
+        LinearLayout.LayoutParams editorParams = new LinearLayout.LayoutParams(-1, 0, 1);
+        editorParams.setMargins(0, 10, 0, 10);
+        root.addView(editorPanel, editorParams);
+        LinearLayout.LayoutParams previewParams = new LinearLayout.LayoutParams(-1, 0, 1);
+        previewParams.setMargins(0, 10, 0, 10);
+        root.addView(previewPanel, previewParams);
+
+        LinearLayout sampleRow = new LinearLayout(this);
+        sampleRow.setOrientation(LinearLayout.HORIZONTAL);
+        Button sample = actionButton("Sample");
+        sample.setOnClickListener(v -> editor.setText("# Paperang P1\n\n- Native Android print\n- Markdown rendering\n\nName | Result\n--- | ---\nBlack stripe | OK\nText | OK"));
+        Button classicConnect = actionButton("Classic");
         classicConnect.setOnClickListener(v -> connectFirstPairedClassicDevice());
-        root.addView(classicConnect);
+        Button bleConnect = actionButton("BLE");
+        bleConnect.setOnClickListener(v -> startBleScan());
+        sampleRow.addView(sample, new LinearLayout.LayoutParams(0, -2, 1));
+        addRowButton(sampleRow, classicConnect);
+        addRowButton(sampleRow, bleConnect);
+        root.addView(sampleRow);
 
-        Button stripe = new Button(this);
-        stripe.setText("Black stripe test");
+        LinearLayout printRow = new LinearLayout(this);
+        printRow.setOrientation(LinearLayout.HORIZONTAL);
+        Button stripe = primaryButton("Black stripe");
         stripe.setOnClickListener(v -> printBlackStripe());
-        root.addView(stripe);
-
-        Button print = new Button(this);
-        print.setText("Print text");
-        print.setOnClickListener(v -> printText());
-        root.addView(print);
+        Button print = primaryButton("Print Markdown");
+        print.setOnClickListener(v -> printMarkdown());
+        printRow.addView(stripe, new LinearLayout.LayoutParams(0, -2, 1));
+        addRowButton(printRow, print);
+        root.addView(printRow);
 
         status = new TextView(this);
         status.setTextSize(12);
-        status.setTextColor(Color.rgb(40, 48, 48));
+        status.setTextColor(Color.rgb(45, 57, 54));
+        status.setPadding(14, 12, 14, 12);
         ScrollView scroll = new ScrollView(this);
+        scroll.setBackground(cardBackground(Color.rgb(247, 249, 247), Color.rgb(204, 214, 209), 8));
         scroll.addView(status);
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, 280));
+        LinearLayout.LayoutParams logParams = new LinearLayout.LayoutParams(-1, 150);
+        logParams.setMargins(0, 10, 0, 0);
+        root.addView(scroll, logParams);
 
         setContentView(root);
+        showEditor();
+    }
+
+    private TextView label(String text, int size, int color, boolean bold) {
+        TextView view = new TextView(this);
+        view.setText(text);
+        view.setTextSize(size);
+        view.setTextColor(color);
+        if (bold) {
+            view.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        }
+        return view;
+    }
+
+    private TextView chip(String text, int background, int foreground) {
+        TextView view = label(text, 13, foreground, true);
+        view.setPadding(14, 10, 14, 10);
+        view.setBackground(cardBackground(background, Color.rgb(204, 214, 209), 8));
+        return view;
+    }
+
+    private Button actionButton(String text) {
+        Button button = new Button(this);
+        button.setText(text);
+        button.setTextSize(13);
+        button.setAllCaps(false);
+        return button;
+    }
+
+    private Button primaryButton(String text) {
+        Button button = actionButton(text);
+        button.setTextSize(14);
+        return button;
+    }
+
+    private LinearLayout panel(int background, int stroke) {
+        LinearLayout view = new LinearLayout(this);
+        view.setOrientation(LinearLayout.VERTICAL);
+        view.setBackground(cardBackground(background, stroke, 8));
+        return view;
+    }
+
+    private GradientDrawable cardBackground(int color, int stroke, int radius) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(color);
+        drawable.setCornerRadius(radius);
+        if (stroke != 0) {
+            drawable.setStroke(1, stroke);
+        }
+        return drawable;
+    }
+
+    private void addRowButton(LinearLayout row, Button button) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
+        params.setMargins(8, 0, 0, 0);
+        row.addView(button, params);
+    }
+
+    private void showEditor() {
+        editorPanel.setVisibility(View.VISIBLE);
+        previewPanel.setVisibility(View.GONE);
+        editTab.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        previewTab.setTypeface(Typeface.DEFAULT, Typeface.NORMAL);
+    }
+
+    private void showPreview() {
+        updatePreview();
+        editorPanel.setVisibility(View.GONE);
+        previewPanel.setVisibility(View.VISIBLE);
+        editTab.setTypeface(Typeface.DEFAULT, Typeface.NORMAL);
+        previewTab.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+    }
+
+    private void updatePreview() {
+        markdownRenderer().setMarkdown(preview, editor.getText().toString());
     }
 
     private void requestNeededPermissions() {
@@ -164,6 +325,7 @@ public class MainActivity extends Activity {
             log("No BLE scanner.");
             return;
         }
+        setDeviceStatus("Scanning BLE", "Route: BLE 8841");
         log("BLE scanning...");
         try {
             scanner.startScan(scanCallback);
@@ -189,6 +351,7 @@ public class MainActivity extends Activity {
                 } catch (SecurityException ignored) {
                 }
                 log("BLE found: " + name + " " + safeAddress(device));
+                setDeviceStatus("BLE found: " + safeLabel(name), "Route: BLE 8841");
                 connectBleDevice(device);
             }
         }
@@ -201,6 +364,7 @@ public class MainActivity extends Activity {
             gatt = null;
         }
         log("BLE connecting...");
+        setDeviceStatus("BLE connecting", "Route: BLE 8841");
         try {
             gatt = device.connectGatt(this, false, gattCallback);
         } catch (SecurityException e) {
@@ -213,6 +377,7 @@ public class MainActivity extends Activity {
         public void onConnectionStateChange(BluetoothGatt g, int statusCode, int newState) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 log("BLE connected. Discovering services...");
+                setDeviceStatus("BLE connected", "Route: BLE 8841");
                 try {
                     g.discoverServices();
                 } catch (SecurityException e) {
@@ -220,6 +385,7 @@ public class MainActivity extends Activity {
                 }
             } else {
                 log("BLE disconnected: " + statusCode);
+                setDeviceStatus("BLE disconnected", "Route: none");
             }
         }
 
@@ -235,6 +401,7 @@ public class MainActivity extends Activity {
                 log("BLE write characteristic not found.");
                 return;
             }
+            setDeviceStatus("BLE ready", "Write: 8841");
             BluetoothGattCharacteristic notify = service.getCharacteristic(PAPERANG_NOTIFY_UUID);
             if (notify != null) {
                 try {
@@ -283,9 +450,11 @@ public class MainActivity extends Activity {
                 }
                 if (target == null) {
                     log("No paired Paperang/Miao device. Pair it in Android Bluetooth settings first.");
+                    setDeviceStatus("No paired printer", "Route: none");
                     return;
                 }
                 log("Classic connecting: " + safeDeviceName(target) + " " + safeAddress(target));
+                setDeviceStatus("Classic connecting", "Route: SPP");
                 closeBle();
                 closeClassic();
                 classicSocket = target.createRfcommSocketToServiceRecord(SPP_UUID);
@@ -293,11 +462,13 @@ public class MainActivity extends Activity {
                 classicSocket.connect();
                 classicOutput = classicSocket.getOutputStream();
                 log("Classic connected.");
+                setDeviceStatus("Classic ready: " + safeLabel(safeDeviceName(target)), "Route: SPP");
                 initializePrinter();
             } catch (SecurityException e) {
                 log("Classic Bluetooth permission denied.");
             } catch (IOException e) {
                 log("Classic connect failed: " + e.getMessage());
+                setDeviceStatus("Classic failed", "Route: none");
                 closeClassic();
             }
         }).start();
@@ -324,9 +495,9 @@ public class MainActivity extends Activity {
         sendImage(data);
     }
 
-    private void printText() {
+    private void printMarkdown() {
         if (!ready()) return;
-        sendImage(renderText(editor.getText().toString()));
+        sendImage(renderMarkdown(editor.getText().toString()));
     }
 
     private void sendImage(byte[] image) {
@@ -344,41 +515,39 @@ public class MainActivity extends Activity {
         log("Queued image bytes=" + image.length + " lines=" + (image.length / WIDTH_BYTES));
     }
 
-    private byte[] renderText(String text) {
-        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        paint.setColor(Color.BLACK);
-        paint.setTextSize(24);
-        List<String> lines = wrapText(text, paint, WIDTH_PX - 32);
-        int lineHeight = 34;
-        int height = Math.max(164, 28 + lines.size() * lineHeight);
+    private byte[] renderMarkdown(String markdown) {
+        TextView preview = new TextView(this);
+        preview.setTextColor(Color.BLACK);
+        preview.setTextSize(22);
+        preview.setIncludeFontPadding(true);
+        preview.setPadding(16, 16, 16, 16);
+        preview.setLineSpacing(0, 1.05f);
+        preview.setBackgroundColor(Color.WHITE);
+        markdownRenderer().setMarkdown(preview, markdown);
+
+        int widthSpec = View.MeasureSpec.makeMeasureSpec(WIDTH_PX, View.MeasureSpec.EXACTLY);
+        int heightSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
+        preview.measure(widthSpec, heightSpec);
+        int height = Math.max(164, preview.getMeasuredHeight());
+        preview.layout(0, 0, WIDTH_PX, height);
+
         Bitmap bitmap = Bitmap.createBitmap(WIDTH_PX, height, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
         canvas.drawColor(Color.WHITE);
-        int y = 28;
-        for (String line : lines) {
-            canvas.drawText(line, 16, y, paint);
-            y += lineHeight;
-        }
+        preview.draw(canvas);
         return encodeBitmap(bitmap);
     }
 
-    private List<String> wrapText(String text, Paint paint, int maxWidth) {
-        String normalized = text.replace("\r\n", "\n").replace("|", " | ");
-        List<String> lines = new ArrayList<>();
-        for (String paragraph : normalized.split("\n")) {
-            String current = "";
-            for (int i = 0; i < paragraph.length(); i++) {
-                String next = current + paragraph.charAt(i);
-                if (paint.measureText(next) > maxWidth && current.length() > 0) {
-                    lines.add(current);
-                    current = String.valueOf(paragraph.charAt(i));
-                } else {
-                    current = next;
-                }
-            }
-            lines.add(current.length() == 0 ? " " : current);
+    private Markwon markdownRenderer() {
+        if (markwon == null) {
+            markwon = Markwon.builder(this)
+                    .usePlugin(TablePlugin.create(this))
+                    .usePlugin(TaskListPlugin.create(this))
+                    .usePlugin(StrikethroughPlugin.create())
+                    .usePlugin(HtmlPlugin.create())
+                    .build();
         }
-        return lines.isEmpty() ? java.util.Collections.singletonList(" ") : lines;
+        return markwon;
     }
 
     private byte[] encodeBitmap(Bitmap bitmap) {
@@ -512,6 +681,21 @@ public class MainActivity extends Activity {
         } catch (SecurityException e) {
             return "";
         }
+    }
+
+    private String safeLabel(String value) {
+        return value == null || value.length() == 0 ? "Paperang" : value;
+    }
+
+    private void setDeviceStatus(String connection, String route) {
+        handler.post(() -> {
+            if (connectionStatus != null) {
+                connectionStatus.setText(connection);
+            }
+            if (routeStatus != null) {
+                routeStatus.setText(route);
+            }
+        });
     }
 
     private void closeConnections() {

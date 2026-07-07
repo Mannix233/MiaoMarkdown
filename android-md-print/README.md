@@ -31,7 +31,9 @@ miao-md-print-debug-apk / app-debug.apk
 - Connects to service `49535343-fe7d-4ae5-8fa9-9fafd205e455`
 - Writes to characteristic `49535343-8841-43f4-a8d4-ecbe34729bb3`
 - Classic Bluetooth SPP fallback for paired devices
-- Renders short text/Markdown-ish content to 384 px bitmap
+- Renders Markdown with Markwon before converting the preview to a 384 px bitmap
+- Edit/Preview UI with connection and route status
+- Supports CommonMark plus GFM tables, task lists, strikethrough, and basic HTML through Markwon plugins
 - Sends Paperang-style packets with CRC and feed command
 
 This is still a prototype and needs real-device APK testing.
