@@ -53,7 +53,6 @@ import java.util.concurrent.Executors;
 import io.noties.markwon.Markwon;
 import io.noties.markwon.ext.strikethrough.StrikethroughPlugin;
 import io.noties.markwon.ext.tables.TablePlugin;
-import io.noties.markwon.ext.tables.TableTheme;
 import io.noties.markwon.ext.tasklist.TaskListPlugin;
 import io.noties.markwon.html.HtmlPlugin;
 
@@ -757,16 +756,14 @@ public class MainActivity extends Activity {
 
     private Markwon markdownRenderer() {
         if (markwon == null) {
-            TableTheme tableTheme = TableTheme.builder()
-                    .tableBorderColor(Color.BLACK)
-                    .tableBorderWidth(2)
-                    .tableCellPadding(6)
-                    .tableHeaderRowBackgroundColor(Color.WHITE)
-                    .tableEvenRowBackgroundColor(Color.WHITE)
-                    .tableOddRowBackgroundColor(Color.WHITE)
-                    .build();
             markwon = Markwon.builder(this)
-                    .usePlugin(TablePlugin.create(tableTheme))
+                    .usePlugin(TablePlugin.create(builder -> builder
+                            .tableBorderColor(Color.BLACK)
+                            .tableBorderWidth(2)
+                            .tableCellPadding(6)
+                            .tableHeaderRowBackgroundColor(Color.WHITE)
+                            .tableEvenRowBackgroundColor(Color.WHITE)
+                            .tableOddRowBackgroundColor(Color.WHITE)))
                     .usePlugin(TaskListPlugin.create(this))
                     .usePlugin(StrikethroughPlugin.create())
                     .usePlugin(HtmlPlugin.create())
