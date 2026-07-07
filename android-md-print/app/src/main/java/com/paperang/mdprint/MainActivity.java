@@ -67,6 +67,7 @@ public class MainActivity extends Activity {
     private static final int PAPER_PADDING_PX = 22;
     private static final float DEFAULT_CONTENT_TEXT_PX = 19f;
     private static final float ADVANCE_MM_PER_PX = 0.1217f;
+    private static final int FEED_UNITS_PER_MM = 56;
     private static final int MIN_PRINT_HEIGHT_PX = 165;
     private static final int MAX_PRINT_HEIGHT_PX = 12000;
     private static final int STANDARD_CRC_KEY = 0x35769521;
@@ -84,6 +85,8 @@ public class MainActivity extends Activity {
     private TextView routeStatus;
     private TextView estimateStatus;
     private TextView fontStatus;
+    private TextView densityStatus;
+    private TextView feedStatus;
     private TextView status;
     private ScrollView editorPanel;
     private ScrollView previewPanel;
@@ -97,6 +100,8 @@ public class MainActivity extends Activity {
     private OutputStream classicOutput;
     private Markwon markwon;
     private float contentTextPx = DEFAULT_CONTENT_TEXT_PX;
+    private int printDensity = 75;
+    private float postPrintFeedMm = 5f;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -125,19 +130,23 @@ public class MainActivity extends Activity {
         header.addView(subtitle);
         root.addView(header, new LinearLayout.LayoutParams(-1, -2));
 
+        LinearLayout statusCard = panel(Color.rgb(247, 249, 247), Color.rgb(198, 209, 203));
+        statusCard.setPadding(12, 12, 12, 12);
+        LinearLayout.LayoutParams statusCardParams = new LinearLayout.LayoutParams(-1, -2);
+        statusCardParams.setMargins(0, 10, 0, 0);
         LinearLayout statusRow = new LinearLayout(this);
         statusRow.setOrientation(LinearLayout.HORIZONTAL);
-        statusRow.setPadding(0, 12, 0, 10);
+        statusRow.setPadding(0, 0, 0, 8);
         connectionStatus = chip("未连接", Color.rgb(255, 255, 255), Color.rgb(31, 44, 41));
         routeStatus = chip("通道：无", Color.rgb(213, 231, 223), Color.rgb(31, 44, 41));
         statusRow.addView(connectionStatus, new LinearLayout.LayoutParams(0, -2, 1));
         LinearLayout.LayoutParams routeParams = new LinearLayout.LayoutParams(0, -2, 1);
         routeParams.setMargins(10, 0, 0, 0);
         statusRow.addView(routeStatus, routeParams);
-        root.addView(statusRow);
+        statusCard.addView(statusRow);
 
         estimateStatus = chip("纸宽 384px · 高度待计算 · 0.1217mm/px", Color.rgb(255, 251, 235), Color.rgb(62, 49, 25));
-        root.addView(estimateStatus, new LinearLayout.LayoutParams(-1, -2));
+        statusCard.addView(estimateStatus, new LinearLayout.LayoutParams(-1, -2));
 
         LinearLayout sizeRow = new LinearLayout(this);
         sizeRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -152,7 +161,38 @@ public class MainActivity extends Activity {
         fontParams.setMargins(8, 0, 0, 0);
         sizeRow.addView(fontStatus, fontParams);
         addRowButton(sizeRow, larger);
-        root.addView(sizeRow);
+        statusCard.addView(sizeRow);
+
+        LinearLayout densityRow = new LinearLayout(this);
+        densityRow.setOrientation(LinearLayout.HORIZONTAL);
+        densityRow.setPadding(0, 8, 0, 0);
+        Button densityDown = actionButton("浓度 -");
+        densityDown.setOnClickListener(v -> adjustDensity(-5));
+        densityStatus = chip("浓度 75", Color.rgb(255, 255, 255), Color.rgb(31, 44, 41));
+        Button densityUp = actionButton("浓度 +");
+        densityUp.setOnClickListener(v -> adjustDensity(5));
+        densityRow.addView(densityDown, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams densityParams = new LinearLayout.LayoutParams(0, -2, 1);
+        densityParams.setMargins(8, 0, 0, 0);
+        densityRow.addView(densityStatus, densityParams);
+        addRowButton(densityRow, densityUp);
+        statusCard.addView(densityRow);
+
+        LinearLayout feedRow = new LinearLayout(this);
+        feedRow.setOrientation(LinearLayout.HORIZONTAL);
+        feedRow.setPadding(0, 8, 0, 0);
+        Button feedDown = actionButton("尾纸 -");
+        feedDown.setOnClickListener(v -> adjustFeed(-1f));
+        feedStatus = chip("尾纸 5mm", Color.rgb(255, 255, 255), Color.rgb(31, 44, 41));
+        Button feedUp = actionButton("尾纸 +");
+        feedUp.setOnClickListener(v -> adjustFeed(1f));
+        feedRow.addView(feedDown, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams feedParams = new LinearLayout.LayoutParams(0, -2, 1);
+        feedParams.setMargins(8, 0, 0, 0);
+        feedRow.addView(feedStatus, feedParams);
+        addRowButton(feedRow, feedUp);
+        statusCard.addView(feedRow);
+        root.addView(statusCard, statusCardParams);
 
         LinearLayout tabs = new LinearLayout(this);
         tabs.setOrientation(LinearLayout.HORIZONTAL);
@@ -201,7 +241,7 @@ public class MainActivity extends Activity {
         preview = createPaperView();
         previewPanel = new ScrollView(this);
         previewPanel.setFillViewport(true);
-        previewPanel.setBackgroundColor(Color.rgb(224, 230, 226));
+        previewPanel.setBackgroundColor(Color.rgb(229, 234, 231));
         previewPanel.setPadding(18, 18, 18, 28);
         previewPanel.addView(preview, new ScrollView.LayoutParams(WIDTH_PX, -2));
         previewScroller = new HorizontalScrollView(this);
@@ -219,7 +259,8 @@ public class MainActivity extends Activity {
 
         LinearLayout sampleRow = new LinearLayout(this);
         sampleRow.setOrientation(LinearLayout.HORIZONTAL);
-        Button sample = actionButton("示例");
+        sampleRow.setPadding(0, 0, 0, 8);
+        Button sample = actionButton("填入示例");
         sample.setOnClickListener(v -> editor.setText("# Paperang P1\n\n- 原生安卓打印\n- Markdown 预览与纸上输出统一\n\n项目 | 结果\n--- | ---\n黑条 | OK\n文字 | OK\n\n`paperang` 应该是一行内正常长度。"));
         Button classicConnect = actionButton("经典蓝牙");
         classicConnect.setOnClickListener(v -> connectFirstPairedClassicDevice());
@@ -241,13 +282,13 @@ public class MainActivity extends Activity {
         root.addView(printRow);
 
         status = new TextView(this);
-        status.setTextSize(12);
+        status.setTextSize(11);
         status.setTextColor(Color.rgb(45, 57, 54));
         status.setPadding(14, 12, 14, 12);
         ScrollView scroll = new ScrollView(this);
         scroll.setBackground(cardBackground(Color.rgb(247, 249, 247), Color.rgb(204, 214, 209), 8));
         scroll.addView(status);
-        LinearLayout.LayoutParams logParams = new LinearLayout.LayoutParams(-1, 150);
+        LinearLayout.LayoutParams logParams = new LinearLayout.LayoutParams(-1, 118);
         logParams.setMargins(0, 10, 0, 0);
         root.addView(scroll, logParams);
 
@@ -355,6 +396,24 @@ public class MainActivity extends Activity {
             updatePreview();
         } else {
             updateEstimate();
+        }
+    }
+
+    private void adjustDensity(int delta) {
+        printDensity = Math.max(0, Math.min(255, printDensity + delta));
+        if (densityStatus != null) {
+            densityStatus.setText("浓度 " + printDensity);
+        }
+        if (readySilently()) {
+            sendRaw(pack(25, new byte[]{(byte) printDensity}, 0));
+            log("已设置打印浓度：" + printDensity);
+        }
+    }
+
+    private void adjustFeed(float deltaMm) {
+        postPrintFeedMm = Math.max(0f, Math.min(20f, postPrintFeedMm + deltaMm));
+        if (feedStatus != null) {
+            feedStatus.setText("尾纸 " + formatMm(postPrintFeedMm) + "mm");
         }
     }
 
@@ -540,7 +599,7 @@ public class MainActivity extends Activity {
         crcKey = SESSION_CRC_KEY;
         sendRaw(pack(34, new byte[]{0}, 0));
         sendRaw(pack(44, new byte[]{0}, 0));
-        sendRaw(pack(25, new byte[]{75}, 0));
+        sendRaw(pack(25, new byte[]{(byte) printDensity}, 0));
         log("打印机初始化完成。");
     }
 
@@ -574,9 +633,9 @@ public class MainActivity extends Activity {
             sendRaw(pack(0, chunk, packetId++));
         }
         sendRaw(pack(44, new byte[]{0}, 0));
-        sendRaw(pack(26, int16le(280), 0));
+        sendRaw(pack(26, int16le(feedUnits()), 0));
         int heightPx = image.length / WIDTH_BYTES;
-        log("已入队：宽 384px，高 " + heightPx + "px，数据 " + image.length + " bytes，预计 " + formatMm(estimateLengthMm(heightPx)) + "mm");
+        log("已入队：宽 384px，高 " + heightPx + "px，数据 " + image.length + " bytes，内容约 " + formatMm(estimateLengthMm(heightPx)) + "mm，尾纸 " + formatMm(postPrintFeedMm) + "mm");
     }
 
     private RenderedPaper renderMarkdown(String markdown) {
@@ -633,6 +692,10 @@ public class MainActivity extends Activity {
 
     private float estimateLengthMm(int heightPx) {
         return Math.max(20f, heightPx * ADVANCE_MM_PER_PX);
+    }
+
+    private int feedUnits() {
+        return Math.max(0, Math.round(postPrintFeedMm * FEED_UNITS_PER_MM));
     }
 
     private String formatMm(float value) {
@@ -765,11 +828,15 @@ public class MainActivity extends Activity {
     }
 
     private boolean ready() {
-        if (classicOutput != null || bleWriteCharacteristic != null) {
+        if (readySilently()) {
             return true;
         }
         log("请先连接经典蓝牙或 BLE。");
         return false;
+    }
+
+    private boolean readySilently() {
+        return classicOutput != null || bleWriteCharacteristic != null;
     }
 
     private boolean isPaperangName(String name) {
