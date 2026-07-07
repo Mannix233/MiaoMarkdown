@@ -20,6 +20,7 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
@@ -43,6 +44,8 @@ import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.Queue;
 import java.util.Set;
@@ -67,6 +70,13 @@ public class MainActivity extends Activity {
     private static final int WIDTH_PX = 384;
     private static final int WIDTH_BYTES = 48;
     private static final int PAPER_PADDING_PX = 22;
+    private static final int CONTENT_WIDTH_PX = WIDTH_PX - PAPER_PADDING_PX * 2;
+    private static final int BLOCK_GAP_PX = 8;
+    private static final int THERMAL_THRESHOLD = 190;
+    private static final int TABLE_BORDER_PX = 2;
+    private static final int TABLE_CELL_PADDING_X = 5;
+    private static final int TABLE_CELL_PADDING_Y = 5;
+    private static final float TABLE_TEXT_SCALE = 0.82f;
     private static final float DEFAULT_CONTENT_TEXT_PX = 19f;
     private static final float ADVANCE_MM_PER_PX = 0.1217f;
     private static final int FEED_UNITS_PER_MM = 56;
@@ -392,7 +402,7 @@ public class MainActivity extends Activity {
 
     private void updatePreview() {
         markdownRenderer().setMarkdown(preview, prepareMarkdownForPaper(editor.getText().toString()));
-        updateEstimate(measurePaperView(preview));
+        updateEstimate(measureThermalHeight(editor.getText().toString()));
     }
 
     private void adjustTextSize(float deltaPx) {
@@ -627,6 +637,9 @@ public class MainActivity extends Activity {
         if (!ready()) return;
         RenderedPaper paper = renderMarkdown(editor.getText().toString());
         updateEstimate(paper.heightPx);
+        if (paper.tableCount > 0) {
+            log("表格已使用热敏模式重排：" + paper.tableCount + " 个。");
+        }
         log("打印预估：宽 384px，高 " + paper.heightPx + "px，约 " + formatMm(estimateLengthMm(paper.heightPx)) + "mm");
         sendImage(paper.bytes);
     }
@@ -648,9 +661,29 @@ public class MainActivity extends Activity {
     }
 
     private RenderedPaper renderMarkdown(String markdown) {
-        TextView paper = createPaperView();
-        markdownRenderer().setMarkdown(paper, prepareMarkdownForPaper(markdown));
-        int height = measurePaperView(paper);
+        List<PrintBlock> blocks = parsePrintBlocks(markdown);
+        List<BlockBitmap> bitmaps = new ArrayList<>();
+        int height = PAPER_PADDING_PX * 2;
+        int tableCount = 0;
+
+        for (PrintBlock block : blocks) {
+            Bitmap blockBitmap = block.table == null
+                    ? renderTextBlock(block.text)
+                    : renderTableBlock(block.table);
+            if (blockBitmap == null || blockBitmap.getHeight() == 0) {
+                continue;
+            }
+            if (block.table != null) {
+                tableCount++;
+            }
+            if (!bitmaps.isEmpty()) {
+                height += BLOCK_GAP_PX;
+            }
+            bitmaps.add(new BlockBitmap(blockBitmap));
+            height += blockBitmap.getHeight();
+        }
+
+        height = Math.max(MIN_PRINT_HEIGHT_PX, height);
         if (height > MAX_PRINT_HEIGHT_PX) {
             height = MAX_PRINT_HEIGHT_PX;
             log("内容超过最大渲染高度，已截到 " + MAX_PRINT_HEIGHT_PX + "px。");
@@ -659,17 +692,29 @@ public class MainActivity extends Activity {
         Bitmap bitmap = Bitmap.createBitmap(WIDTH_PX, height, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
         canvas.drawColor(Color.WHITE);
-        paper.draw(canvas);
-        return new RenderedPaper(encodeBitmap(bitmap), height);
+        int y = PAPER_PADDING_PX;
+        for (int i = 0; i < bitmaps.size(); i++) {
+            if (i > 0) {
+                y += BLOCK_GAP_PX;
+            }
+            Bitmap blockBitmap = bitmaps.get(i).bitmap;
+            if (y >= height) {
+                break;
+            }
+            canvas.drawBitmap(blockBitmap, PAPER_PADDING_PX, y, null);
+            y += blockBitmap.getHeight();
+        }
+
+        return new RenderedPaper(encodeBitmap(bitmap), height, tableCount);
     }
 
     private TextView createPaperView() {
         TextView paper = new TextView(this);
         paper.setTextColor(Color.BLACK);
         paper.setTextSize(TypedValue.COMPLEX_UNIT_PX, contentTextPx);
-        paper.setIncludeFontPadding(true);
+        paper.setIncludeFontPadding(false);
         paper.setPadding(PAPER_PADDING_PX, PAPER_PADDING_PX, PAPER_PADDING_PX, PAPER_PADDING_PX);
-        paper.setLineSpacing(0, 1.05f);
+        paper.setLineSpacing(2f, 1.12f);
         paper.setBackgroundColor(Color.WHITE);
         paper.setMinWidth(WIDTH_PX);
         paper.setMaxWidth(WIDTH_PX);
@@ -686,10 +731,58 @@ public class MainActivity extends Activity {
         return height;
     }
 
+    private TextView createContentView() {
+        TextView view = new TextView(this);
+        view.setTextColor(Color.BLACK);
+        view.setTextSize(TypedValue.COMPLEX_UNIT_PX, contentTextPx);
+        view.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL));
+        view.setIncludeFontPadding(false);
+        view.setPadding(0, 0, 0, 0);
+        view.setLineSpacing(2f, 1.14f);
+        view.setBackgroundColor(Color.WHITE);
+        view.setMinWidth(CONTENT_WIDTH_PX);
+        view.setMaxWidth(CONTENT_WIDTH_PX);
+        view.setWidth(CONTENT_WIDTH_PX);
+        return view;
+    }
+
+    private int measureContentView(TextView view) {
+        int widthSpec = View.MeasureSpec.makeMeasureSpec(CONTENT_WIDTH_PX, View.MeasureSpec.EXACTLY);
+        int heightSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
+        view.measure(widthSpec, heightSpec);
+        int height = Math.max(0, view.getMeasuredHeight());
+        view.layout(0, 0, CONTENT_WIDTH_PX, height);
+        return height;
+    }
+
+    private Bitmap renderTextBlock(String markdown) {
+        if (markdown == null || markdown.trim().length() == 0) {
+            return null;
+        }
+        TextView view = createContentView();
+        markdownRenderer().setMarkdown(view, prepareMarkdownForPaper(markdown.trim()));
+        int height = measureContentView(view);
+        if (height <= 0) {
+            return null;
+        }
+        Bitmap bitmap = Bitmap.createBitmap(CONTENT_WIDTH_PX, height, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        canvas.drawColor(Color.WHITE);
+        view.draw(canvas);
+        return bitmap;
+    }
+
+    private int measureTextBlockHeight(String markdown) {
+        if (markdown == null || markdown.trim().length() == 0) {
+            return 0;
+        }
+        TextView view = createContentView();
+        markdownRenderer().setMarkdown(view, prepareMarkdownForPaper(markdown.trim()));
+        return measureContentView(view);
+    }
+
     private void updateEstimate() {
-        TextView paper = createPaperView();
-        markdownRenderer().setMarkdown(paper, prepareMarkdownForPaper(editor.getText().toString()));
-        updateEstimate(measurePaperView(paper));
+        updateEstimate(measureThermalHeight(editor.getText().toString()));
     }
 
     private String prepareMarkdownForPaper(String markdown) {
@@ -725,6 +818,384 @@ public class MainActivity extends Activity {
         return out.toString();
     }
 
+    private int measureThermalHeight(String markdown) {
+        List<PrintBlock> blocks = parsePrintBlocks(markdown);
+        int height = PAPER_PADDING_PX * 2;
+        int visibleBlocks = 0;
+        for (PrintBlock block : blocks) {
+            int blockHeight = block.table == null
+                    ? measureTextBlockHeight(block.text)
+                    : layoutTable(block.table).height;
+            if (blockHeight <= 0) {
+                continue;
+            }
+            if (visibleBlocks > 0) {
+                height += BLOCK_GAP_PX;
+            }
+            height += blockHeight;
+            visibleBlocks++;
+        }
+        return Math.min(MAX_PRINT_HEIGHT_PX, Math.max(MIN_PRINT_HEIGHT_PX, height));
+    }
+
+    private List<PrintBlock> parsePrintBlocks(String markdown) {
+        String normalized = markdown == null ? "" : markdown.replace("\r\n", "\n").replace('\r', '\n');
+        String[] lines = normalized.split("\n", -1);
+        List<PrintBlock> blocks = new ArrayList<>();
+        StringBuilder text = new StringBuilder();
+
+        int i = 0;
+        while (i < lines.length) {
+            if (i + 1 < lines.length && isTableHeader(lines[i], lines[i + 1])) {
+                flushTextBlock(blocks, text);
+                List<String> tableLines = new ArrayList<>();
+                tableLines.add(lines[i]);
+                tableLines.add(lines[i + 1]);
+                i += 2;
+                while (i < lines.length && lines[i].trim().length() > 0 && lines[i].indexOf('|') >= 0) {
+                    tableLines.add(lines[i]);
+                    i++;
+                }
+                blocks.add(PrintBlock.table(parseTableBlock(tableLines)));
+                continue;
+            }
+
+            if (text.length() > 0) {
+                text.append('\n');
+            }
+            text.append(lines[i]);
+            i++;
+        }
+        flushTextBlock(blocks, text);
+        return blocks;
+    }
+
+    private void flushTextBlock(List<PrintBlock> blocks, StringBuilder text) {
+        if (text.length() > 0 && text.toString().trim().length() > 0) {
+            blocks.add(PrintBlock.text(text.toString()));
+        }
+        text.setLength(0);
+    }
+
+    private boolean isTableHeader(String headerLine, String separatorLine) {
+        if (headerLine == null || headerLine.indexOf('|') < 0) {
+            return false;
+        }
+        String[] headers = splitTableCells(headerLine);
+        if (headers.length < 2) {
+            return false;
+        }
+        return isSeparatorLine(separatorLine, headers.length);
+    }
+
+    private boolean isSeparatorLine(String line, int expectedColumns) {
+        String[] cells = splitTableCells(line);
+        if (cells.length < 2 || cells.length < expectedColumns) {
+            return false;
+        }
+        for (String cell : cells) {
+            String trimmed = cell.trim();
+            if (!trimmed.matches(":?-{3,}:?")) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private String[] splitTableCells(String line) {
+        String trimmed = line == null ? "" : line.trim();
+        if (trimmed.startsWith("|")) {
+            trimmed = trimmed.substring(1);
+        }
+        if (trimmed.endsWith("|")) {
+            trimmed = trimmed.substring(0, trimmed.length() - 1);
+        }
+        return trimmed.split("\\|", -1);
+    }
+
+    private TableBlock parseTableBlock(List<String> lines) {
+        String[] headerCells = splitTableCells(lines.get(0));
+        String[] separatorCells = splitTableCells(lines.get(1));
+        int columns = Math.max(headerCells.length, separatorCells.length);
+        TableBlock table = new TableBlock(columns);
+        for (int i = 0; i < columns; i++) {
+            table.align[i] = parseTableAlign(i < separatorCells.length ? separatorCells[i] : "");
+        }
+        table.rows.add(new TableRow(normalizeTableCells(headerCells, columns), true));
+        for (int i = 2; i < lines.size(); i++) {
+            table.rows.add(new TableRow(normalizeTableCells(splitTableCells(lines.get(i)), columns), false));
+        }
+        return table;
+    }
+
+    private int parseTableAlign(String separator) {
+        String trimmed = separator == null ? "" : separator.trim();
+        boolean left = trimmed.startsWith(":");
+        boolean right = trimmed.endsWith(":");
+        if (left && right) {
+            return TableBlock.ALIGN_CENTER;
+        }
+        if (right) {
+            return TableBlock.ALIGN_RIGHT;
+        }
+        return TableBlock.ALIGN_LEFT;
+    }
+
+    private String[] normalizeTableCells(String[] cells, int columns) {
+        String[] out = new String[columns];
+        for (int i = 0; i < columns; i++) {
+            out[i] = cleanTableCell(i < cells.length ? cells[i] : "");
+        }
+        return out;
+    }
+
+    private String cleanTableCell(String cell) {
+        String cleaned = cell == null ? "" : cell.trim();
+        cleaned = cleaned.replaceAll("(?i)<br\\s*/?>", " ");
+        cleaned = cleaned.replaceAll("\\[([^\\]]+)\\]\\(([^)]+)\\)", "$1");
+        cleaned = cleaned.replace("`", "");
+        cleaned = cleaned.replace("**", "");
+        cleaned = cleaned.replace("__", "");
+        cleaned = cleaned.replace("*", "");
+        cleaned = cleaned.replace("_", "");
+        cleaned = cleaned.replaceAll("\\s+", " ");
+        return cleaned.trim();
+    }
+
+    private Bitmap renderTableBlock(TableBlock table) {
+        TableLayout layout = layoutTable(table);
+        if (layout.height <= 0) {
+            return null;
+        }
+
+        Bitmap bitmap = Bitmap.createBitmap(CONTENT_WIDTH_PX, layout.height, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        canvas.drawColor(Color.WHITE);
+
+        Paint normalPaint = tableTextPaint(false);
+        Paint headerPaint = tableTextPaint(true);
+        int y = TABLE_BORDER_PX;
+        for (RowLayout row : layout.rows) {
+            int x = TABLE_BORDER_PX;
+            Paint textPaint = row.header ? headerPaint : normalPaint;
+            Paint.FontMetricsInt metrics = textPaint.getFontMetricsInt();
+            int baselineStart = y + TABLE_CELL_PADDING_Y - metrics.ascent;
+            for (int col = 0; col < table.columns; col++) {
+                List<String> lines = row.cells.get(col);
+                int baseline = baselineStart;
+                for (String line : lines) {
+                    float drawX = tableTextX(line, textPaint, x, layout.widths[col], table.align[col]);
+                    canvas.drawText(line, drawX, baseline, textPaint);
+                    baseline += layout.lineHeight;
+                }
+                x += layout.widths[col] + TABLE_BORDER_PX;
+            }
+            y += row.height + TABLE_BORDER_PX;
+        }
+
+        Paint borderPaint = new Paint();
+        borderPaint.setColor(Color.BLACK);
+        borderPaint.setStyle(Paint.Style.FILL);
+        borderPaint.setAntiAlias(false);
+        drawTableGrid(canvas, layout, borderPaint);
+        return bitmap;
+    }
+
+    private TableLayout layoutTable(TableBlock table) {
+        TableLayout layout = new TableLayout();
+        layout.widths = tableColumnWidths(table);
+        Paint normalPaint = tableTextPaint(false);
+        Paint headerPaint = tableTextPaint(true);
+        layout.lineHeight = Math.max(tableLineHeight(normalPaint), tableLineHeight(headerPaint));
+        layout.height = TABLE_BORDER_PX;
+
+        for (TableRow row : table.rows) {
+            RowLayout rowLayout = new RowLayout(row.header);
+            Paint paint = row.header ? headerPaint : normalPaint;
+            int rowHeight = layout.lineHeight + TABLE_CELL_PADDING_Y * 2;
+            for (int col = 0; col < table.columns; col++) {
+                int textWidth = Math.max(8, layout.widths[col] - TABLE_CELL_PADDING_X * 2);
+                List<String> lines = wrapTableText(row.cells[col], paint, textWidth);
+                rowLayout.cells.add(lines);
+                rowHeight = Math.max(rowHeight, lines.size() * layout.lineHeight + TABLE_CELL_PADDING_Y * 2);
+            }
+            rowLayout.height = rowHeight;
+            layout.rows.add(rowLayout);
+            layout.height += rowHeight + TABLE_BORDER_PX;
+        }
+        return layout;
+    }
+
+    private int[] tableColumnWidths(TableBlock table) {
+        int columns = Math.max(1, table.columns);
+        int innerWidth = CONTENT_WIDTH_PX - TABLE_BORDER_PX * (columns + 1);
+        int[] widths = new int[columns];
+        if (innerWidth <= columns * 8) {
+            int equal = Math.max(8, CONTENT_WIDTH_PX / columns - TABLE_BORDER_PX);
+            for (int i = 0; i < columns; i++) {
+                widths[i] = equal;
+            }
+            return widths;
+        }
+
+        int minWidth = Math.max(28, Math.min(58, innerWidth / Math.max(1, columns * 2)));
+        if (minWidth * columns > innerWidth) {
+            int equal = innerWidth / columns;
+            int used = 0;
+            for (int i = 0; i < columns; i++) {
+                widths[i] = i == columns - 1 ? innerWidth - used : equal;
+                used += widths[i];
+            }
+            return widths;
+        }
+
+        int[] weights = new int[columns];
+        int weightSum = 0;
+        for (int col = 0; col < columns; col++) {
+            int weight = 4;
+            for (TableRow row : table.rows) {
+                weight = Math.max(weight, displayUnits(row.cells[col]));
+            }
+            weight = Math.max(4, Math.min(24, weight));
+            weights[col] = weight;
+            weightSum += weight;
+        }
+
+        int flex = innerWidth - minWidth * columns;
+        int used = 0;
+        for (int col = 0; col < columns; col++) {
+            widths[col] = minWidth + Math.round(flex * (weights[col] / (float) weightSum));
+            used += widths[col];
+        }
+        int diff = innerWidth - used;
+        int col = columns - 1;
+        while (diff != 0) {
+            int delta = diff > 0 ? 1 : -1;
+            if (widths[col] + delta >= 8) {
+                widths[col] += delta;
+                diff -= delta;
+            }
+            col--;
+            if (col < 0) {
+                col = columns - 1;
+            }
+        }
+        return widths;
+    }
+
+    private int displayUnits(String text) {
+        int units = 0;
+        for (int i = 0; i < text.length(); i++) {
+            units += text.charAt(i) < 128 ? 1 : 2;
+        }
+        return Math.max(1, units);
+    }
+
+    private Paint tableTextPaint(boolean header) {
+        Paint paint = new Paint();
+        paint.setColor(Color.BLACK);
+        paint.setAntiAlias(false);
+        paint.setDither(false);
+        paint.setSubpixelText(false);
+        paint.setTextSize(Math.max(14f, contentTextPx * TABLE_TEXT_SCALE));
+        paint.setTypeface(Typeface.create(Typeface.SANS_SERIF, header ? Typeface.BOLD : Typeface.NORMAL));
+        paint.setFakeBoldText(header);
+        return paint;
+    }
+
+    private int tableLineHeight(Paint paint) {
+        Paint.FontMetricsInt metrics = paint.getFontMetricsInt();
+        return Math.max(16, metrics.descent - metrics.ascent + 2);
+    }
+
+    private List<String> wrapTableText(String text, Paint paint, int maxWidth) {
+        List<String> lines = new ArrayList<>();
+        String cleaned = text == null ? "" : text.trim();
+        if (cleaned.length() == 0) {
+            lines.add("");
+            return lines;
+        }
+
+        String[] tokens = cleaned.split("\\s+");
+        String current = "";
+        for (String token : tokens) {
+            if (token.length() == 0) {
+                continue;
+            }
+            if (current.length() == 0) {
+                current = paint.measureText(token) <= maxWidth
+                        ? token
+                        : appendWrappedToken(lines, token, paint, maxWidth);
+                continue;
+            }
+
+            String candidate = current + " " + token;
+            if (paint.measureText(candidate) <= maxWidth) {
+                current = candidate;
+            } else {
+                lines.add(current);
+                current = paint.measureText(token) <= maxWidth
+                        ? token
+                        : appendWrappedToken(lines, token, paint, maxWidth);
+            }
+        }
+        if (current.length() > 0) {
+            lines.add(current);
+        }
+        if (lines.isEmpty()) {
+            lines.add("");
+        }
+        return lines;
+    }
+
+    private String appendWrappedToken(List<String> lines, String token, Paint paint, int maxWidth) {
+        StringBuilder current = new StringBuilder();
+        for (int i = 0; i < token.length(); i++) {
+            char c = token.charAt(i);
+            String candidate = current.toString() + c;
+            if (current.length() == 0 || paint.measureText(candidate) <= maxWidth) {
+                current.append(c);
+            } else {
+                lines.add(current.toString());
+                current.setLength(0);
+                current.append(c);
+            }
+        }
+        return current.toString();
+    }
+
+    private float tableTextX(String line, Paint paint, int cellLeft, int cellWidth, int align) {
+        float textWidth = paint.measureText(line);
+        float minX = cellLeft + TABLE_CELL_PADDING_X;
+        if (align == TableBlock.ALIGN_RIGHT) {
+            return Math.max(minX, cellLeft + cellWidth - TABLE_CELL_PADDING_X - textWidth);
+        }
+        if (align == TableBlock.ALIGN_CENTER) {
+            return Math.max(minX, cellLeft + (cellWidth - textWidth) / 2f);
+        }
+        return minX;
+    }
+
+    private void drawTableGrid(Canvas canvas, TableLayout layout, Paint paint) {
+        int y = 0;
+        canvas.drawRect(0, y, CONTENT_WIDTH_PX, y + TABLE_BORDER_PX, paint);
+        y += TABLE_BORDER_PX;
+        for (RowLayout row : layout.rows) {
+            y += row.height;
+            canvas.drawRect(0, y, CONTENT_WIDTH_PX, y + TABLE_BORDER_PX, paint);
+            y += TABLE_BORDER_PX;
+        }
+
+        int x = 0;
+        canvas.drawRect(x, 0, x + TABLE_BORDER_PX, layout.height, paint);
+        x += TABLE_BORDER_PX;
+        for (int width : layout.widths) {
+            x += width;
+            canvas.drawRect(x, 0, x + TABLE_BORDER_PX, layout.height, paint);
+            x += TABLE_BORDER_PX;
+        }
+    }
+
     private void updateEstimate(int heightPx) {
         if (estimateStatus != null) {
             int dotRows = Math.max(1, heightPx);
@@ -744,13 +1215,83 @@ public class MainActivity extends Activity {
         return String.format(Locale.ROOT, "%.1f", value);
     }
 
+    private static class PrintBlock {
+        final String text;
+        final TableBlock table;
+
+        private PrintBlock(String text, TableBlock table) {
+            this.text = text;
+            this.table = table;
+        }
+
+        static PrintBlock text(String text) {
+            return new PrintBlock(text, null);
+        }
+
+        static PrintBlock table(TableBlock table) {
+            return new PrintBlock(null, table);
+        }
+    }
+
+    private static class TableBlock {
+        static final int ALIGN_LEFT = 0;
+        static final int ALIGN_CENTER = 1;
+        static final int ALIGN_RIGHT = 2;
+
+        final int columns;
+        final int[] align;
+        final List<TableRow> rows = new ArrayList<>();
+
+        TableBlock(int columns) {
+            this.columns = columns;
+            this.align = new int[columns];
+        }
+    }
+
+    private static class TableRow {
+        final String[] cells;
+        final boolean header;
+
+        TableRow(String[] cells, boolean header) {
+            this.cells = cells;
+            this.header = header;
+        }
+    }
+
+    private static class TableLayout {
+        final List<RowLayout> rows = new ArrayList<>();
+        int[] widths;
+        int lineHeight;
+        int height;
+    }
+
+    private static class RowLayout {
+        final boolean header;
+        final List<List<String>> cells = new ArrayList<>();
+        int height;
+
+        RowLayout(boolean header) {
+            this.header = header;
+        }
+    }
+
+    private static class BlockBitmap {
+        final Bitmap bitmap;
+
+        BlockBitmap(Bitmap bitmap) {
+            this.bitmap = bitmap;
+        }
+    }
+
     private static class RenderedPaper {
         final byte[] bytes;
         final int heightPx;
+        final int tableCount;
 
-        RenderedPaper(byte[] bytes, int heightPx) {
+        RenderedPaper(byte[] bytes, int heightPx, int tableCount) {
             this.bytes = bytes;
             this.heightPx = heightPx;
+            this.tableCount = tableCount;
         }
     }
 
@@ -782,7 +1323,7 @@ public class MainActivity extends Activity {
                     int x = xb * 8 + bit;
                     int pixel = bitmap.getPixel(x, y);
                     int gray = (Color.red(pixel) + Color.green(pixel) + Color.blue(pixel)) / 3;
-                    value = (value << 1) | (gray < 128 ? 1 : 0);
+                    value = (value << 1) | (gray < THERMAL_THRESHOLD ? 1 : 0);
                 }
                 out[index++] = (byte) value;
             }
