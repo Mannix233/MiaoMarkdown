@@ -782,7 +782,7 @@ public class MainActivity extends Activity {
         String[] lines = normalized.split("\n", -1);
         StringBuilder out = new StringBuilder(normalized.length() + 32);
         for (int i = 0; i < lines.length; i++) {
-            String line = lines[i];
+            String line = prepareLineMathForPreview(lines[i]);
             out.append(line.indexOf('|') >= 0 ? addTableBreakpoints(line) : line);
             if (i < lines.length - 1) {
                 out.append('\n');
@@ -806,6 +806,139 @@ public class MainActivity extends Activity {
                 run = 0;
             }
             out.append(c);
+        }
+        return out.toString();
+    }
+
+    private String prepareLineMathForPreview(String line) {
+        if (line == null || line.length() == 0) {
+            return "";
+        }
+        if (line.indexOf('|') >= 0 && !isLooseSeparatorLine(line)) {
+            String trimmed = line.trim();
+            boolean leadingPipe = trimmed.startsWith("|");
+            boolean trailingPipe = trimmed.endsWith("|");
+            String[] cells = splitTableCells(line);
+            StringBuilder out = new StringBuilder(line.length() + 16);
+            if (leadingPipe) {
+                out.append("| ");
+            }
+            for (int i = 0; i < cells.length; i++) {
+                if (i > 0) {
+                    out.append(" | ");
+                }
+                out.append(prepareMathCellForPreview(cells[i].trim()));
+            }
+            if (trailingPipe) {
+                out.append(" |");
+            }
+            return out.toString();
+        }
+
+        String trimmed = line.trim();
+        if (looksLikeFormula(trimmed) && isMostlyFormulaText(trimmed) && !hasMathDelimiters(trimmed)) {
+            int leading = line.indexOf(trimmed);
+            String prefix = leading > 0 ? line.substring(0, leading) : "";
+            return prefix + "$" + looseMathToLatex(trimmed) + "$";
+        }
+        return line;
+    }
+
+    private String prepareMathCellForPreview(String cell) {
+        if (!looksLikeFormula(cell) || hasMathDelimiters(cell)) {
+            return cell;
+        }
+        return "$" + looseMathToLatex(cell) + "$";
+    }
+
+    private boolean isLooseSeparatorLine(String line) {
+        String[] cells = splitTableCells(line);
+        if (cells.length < 2) {
+            return false;
+        }
+        for (String cell : cells) {
+            String trimmed = cell.trim();
+            if (!trimmed.matches(":?-{3,}:?")) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean hasMathDelimiters(String text) {
+        if (text == null) {
+            return false;
+        }
+        return text.indexOf('$') >= 0 || text.indexOf("\\(") >= 0 || text.indexOf("\\[") >= 0;
+    }
+
+    private boolean looksLikeFormula(String text) {
+        if (text == null) {
+            return false;
+        }
+        String t = text.trim();
+        if (t.length() < 2) {
+            return false;
+        }
+        String lower = t.toLowerCase(Locale.ROOT);
+        if (hasMathDelimiters(t) || lower.contains("frac{") || lower.contains("\\frac")
+                || lower.contains("sqrt{") || lower.contains("\\sqrt")) {
+            return true;
+        }
+        if (t.indexOf('=') >= 0 && (lower.matches(".*[a-z]\\s*\\([^)]*\\).*")
+                || lower.matches(".*\\b[a-z]\\b.*") || t.indexOf('^') >= 0 || t.indexOf('_') >= 0)) {
+            return true;
+        }
+        if (t.indexOf('^') >= 0 || t.indexOf('_') >= 0) {
+            return true;
+        }
+        return lower.matches(".*\\b(alpha|beta|gamma|delta|theta|lambda|mu|xi|pi|rho|sigma|tau|phi|omega)\\b.*")
+                && t.matches(".*[=+\\-*/^_()].*");
+    }
+
+    private boolean isMostlyFormulaText(String text) {
+        if (text == null) {
+            return false;
+        }
+        for (int i = 0; i < text.length(); i++) {
+            Character.UnicodeBlock block = Character.UnicodeBlock.of(text.charAt(i));
+            if (block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS
+                    || block == Character.UnicodeBlock.CJK_COMPATIBILITY_IDEOGRAPHS
+                    || block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A
+                    || block == Character.UnicodeBlock.HIRAGANA
+                    || block == Character.UnicodeBlock.KATAKANA
+                    || block == Character.UnicodeBlock.HANGUL_SYLLABLES) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private String looseMathToLatex(String text) {
+        String out = stripMathDelimiters(text == null ? "" : text.trim());
+        out = addMissingLatexCommandSlash(out, "frac");
+        out = addMissingLatexCommandSlash(out, "sqrt");
+        out = replaceGreekNames(out, true);
+        return out;
+    }
+
+    private String addMissingLatexCommandSlash(String text, String command) {
+        StringBuilder out = new StringBuilder(text.length() + 8);
+        int i = 0;
+        while (i < text.length()) {
+            if (regionMatchesIgnoreCase(text, i, command)
+                    && (i == 0 || text.charAt(i - 1) != '\\')
+                    && (i == 0 || !Character.isLetter(text.charAt(i - 1)))) {
+                int after = i + command.length();
+                int brace = skipSpaces(text, after);
+                if (brace < text.length() && text.charAt(brace) == '{') {
+                    out.append('\\').append(command);
+                    i += command.length();
+                    continue;
+                }
+            }
+            out.append(text.charAt(i));
+            i++;
         }
         return out.toString();
     }
@@ -945,13 +1078,363 @@ public class MainActivity extends Activity {
         String cleaned = cell == null ? "" : cell.trim();
         cleaned = cleaned.replaceAll("(?i)<br\\s*/?>", " ");
         cleaned = cleaned.replaceAll("\\[([^\\]]+)\\]\\(([^)]+)\\)", "$1");
+        boolean formula = looksLikeFormula(cleaned);
         cleaned = cleaned.replace("`", "");
         cleaned = cleaned.replace("**", "");
         cleaned = cleaned.replace("__", "");
-        cleaned = cleaned.replace("*", "");
-        cleaned = cleaned.replace("_", "");
+        if (formula) {
+            cleaned = formulaToThermalText(cleaned);
+        } else {
+            cleaned = cleaned.replace("*", "");
+            cleaned = cleaned.replace("_", "");
+        }
         cleaned = cleaned.replaceAll("\\s+", " ");
         return cleaned.trim();
+    }
+
+    private String formulaToThermalText(String text) {
+        return formulaToThermalText(text, 0);
+    }
+
+    private String formulaToThermalText(String text, int depth) {
+        if (text == null) {
+            return "";
+        }
+        if (depth > 8) {
+            return text;
+        }
+        String out = stripMathDelimiters(text.trim());
+        out = replaceFractionsPlain(out, depth);
+        out = replaceSqrtPlain(out, depth);
+        out = replaceLatexCommandsPlain(out);
+        out = replaceGreekNames(out, false);
+        out = replaceScriptsPlain(out, '^', true);
+        out = replaceScriptsPlain(out, '_', false);
+        out = out.replace("*", "\u00d7");
+        out = out.replace("{", "").replace("}", "");
+        out = out.replaceAll("\\s+", " ");
+        return out.trim();
+    }
+
+    private String stripMathDelimiters(String text) {
+        String out = text == null ? "" : text.trim();
+        while (out.startsWith("$$") && out.endsWith("$$") && out.length() >= 4) {
+            out = out.substring(2, out.length() - 2).trim();
+        }
+        while (out.startsWith("$") && out.endsWith("$") && out.length() >= 2) {
+            out = out.substring(1, out.length() - 1).trim();
+        }
+        out = out.replace("\\(", "").replace("\\)", "");
+        out = out.replace("\\[", "").replace("\\]", "");
+        return out;
+    }
+
+    private String replaceFractionsPlain(String text, int depth) {
+        StringBuilder out = new StringBuilder(text.length());
+        int i = 0;
+        while (i < text.length()) {
+            int start = findNextCommand(text, i, "frac");
+            if (start < 0) {
+                out.append(text.substring(i));
+                break;
+            }
+            out.append(text, i, start);
+            int commandStart = text.charAt(start) == '\\' ? start + 1 : start;
+            int firstBrace = skipSpaces(text, commandStart + 4);
+            if (firstBrace >= text.length() || text.charAt(firstBrace) != '{') {
+                out.append(text.charAt(start));
+                i = start + 1;
+                continue;
+            }
+            int firstEnd = findMatchingBrace(text, firstBrace);
+            if (firstEnd < 0) {
+                out.append(text.substring(start));
+                break;
+            }
+            int secondBrace = skipSpaces(text, firstEnd + 1);
+            if (secondBrace >= text.length() || text.charAt(secondBrace) != '{') {
+                out.append(text.substring(start, firstEnd + 1));
+                i = firstEnd + 1;
+                continue;
+            }
+            int secondEnd = findMatchingBrace(text, secondBrace);
+            if (secondEnd < 0) {
+                out.append(text.substring(start));
+                break;
+            }
+            String numerator = text.substring(firstBrace + 1, firstEnd);
+            String denominator = text.substring(secondBrace + 1, secondEnd);
+            out.append('(')
+                    .append(formulaToThermalText(numerator, depth + 1))
+                    .append(")/(")
+                    .append(formulaToThermalText(denominator, depth + 1))
+                    .append(')');
+            i = secondEnd + 1;
+        }
+        return out.toString();
+    }
+
+    private String replaceSqrtPlain(String text, int depth) {
+        StringBuilder out = new StringBuilder(text.length());
+        int i = 0;
+        while (i < text.length()) {
+            int start = findNextCommand(text, i, "sqrt");
+            if (start < 0) {
+                out.append(text.substring(i));
+                break;
+            }
+            out.append(text, i, start);
+            int commandStart = text.charAt(start) == '\\' ? start + 1 : start;
+            int firstBrace = skipSpaces(text, commandStart + 4);
+            if (firstBrace >= text.length() || text.charAt(firstBrace) != '{') {
+                out.append(text.charAt(start));
+                i = start + 1;
+                continue;
+            }
+            int firstEnd = findMatchingBrace(text, firstBrace);
+            if (firstEnd < 0) {
+                out.append(text.substring(start));
+                break;
+            }
+            String body = text.substring(firstBrace + 1, firstEnd);
+            out.append('\u221a').append('(').append(formulaToThermalText(body, depth + 1)).append(')');
+            i = firstEnd + 1;
+        }
+        return out.toString();
+    }
+
+    private int findNextCommand(String text, int from, String command) {
+        for (int i = Math.max(0, from); i < text.length(); i++) {
+            int commandStart = text.charAt(i) == '\\' ? i + 1 : i;
+            if (!regionMatchesIgnoreCase(text, commandStart, command)) {
+                continue;
+            }
+            if (commandStart > 0 && text.charAt(commandStart - 1) != '\\'
+                    && Character.isLetter(text.charAt(commandStart - 1))) {
+                continue;
+            }
+            int after = commandStart + command.length();
+            if (after < text.length() && Character.isLetter(text.charAt(after))) {
+                continue;
+            }
+            int brace = skipSpaces(text, after);
+            if (brace < text.length() && text.charAt(brace) == '{') {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private int skipSpaces(String text, int from) {
+        int i = Math.max(0, from);
+        while (i < text.length() && Character.isWhitespace(text.charAt(i))) {
+            i++;
+        }
+        return i;
+    }
+
+    private int findMatchingBrace(String text, int openBrace) {
+        if (openBrace < 0 || openBrace >= text.length() || text.charAt(openBrace) != '{') {
+            return -1;
+        }
+        int depth = 0;
+        for (int i = openBrace; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0) {
+                    return i;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private boolean regionMatchesIgnoreCase(String text, int offset, String needle) {
+        return offset >= 0 && offset + needle.length() <= text.length()
+                && text.regionMatches(true, offset, needle, 0, needle.length());
+    }
+
+    private String replaceLatexCommandsPlain(String text) {
+        String out = text;
+        String[][] replacements = {
+                {"\\alpha", "\u03b1"}, {"\\beta", "\u03b2"}, {"\\gamma", "\u03b3"},
+                {"\\delta", "\u03b4"}, {"\\epsilon", "\u03b5"}, {"\\varepsilon", "\u03b5"},
+                {"\\zeta", "\u03b6"}, {"\\eta", "\u03b7"}, {"\\theta", "\u03b8"},
+                {"\\vartheta", "\u03b8"}, {"\\lambda", "\u03bb"}, {"\\mu", "\u03bc"},
+                {"\\nu", "\u03bd"}, {"\\xi", "\u03be"}, {"\\pi", "\u03c0"},
+                {"\\rho", "\u03c1"}, {"\\sigma", "\u03c3"}, {"\\tau", "\u03c4"},
+                {"\\phi", "\u03c6"}, {"\\varphi", "\u03c6"}, {"\\omega", "\u03c9"},
+                {"\\Delta", "\u0394"}, {"\\Omega", "\u03a9"}, {"\\Sigma", "\u03a3"},
+                {"\\cdot", "\u00b7"}, {"\\times", "\u00d7"}, {"\\div", "\u00f7"},
+                {"\\leq", "\u2264"}, {"\\le", "\u2264"}, {"\\geq", "\u2265"},
+                {"\\ge", "\u2265"}, {"\\neq", "\u2260"}, {"\\ne", "\u2260"},
+                {"\\approx", "\u2248"}, {"\\sim", "\u223c"}, {"\\pm", "\u00b1"},
+                {"\\mp", "\u2213"}, {"\\to", "\u2192"}, {"\\rightarrow", "\u2192"},
+                {"\\left", ""}, {"\\right", ""}, {"\\,", ""}, {"\\;", " "},
+                {"\\:", " "}, {"\\ ", " "}
+        };
+        for (String[] pair : replacements) {
+            out = out.replace(pair[0], pair[1]);
+        }
+        return out;
+    }
+
+    private String replaceGreekNames(String text, boolean latex) {
+        String[][] names = {
+                {"varepsilon", latex ? "\\varepsilon" : "\u03b5"},
+                {"vartheta", latex ? "\\vartheta" : "\u03b8"},
+                {"epsilon", latex ? "\\epsilon" : "\u03b5"},
+                {"varphi", latex ? "\\varphi" : "\u03c6"},
+                {"alpha", latex ? "\\alpha" : "\u03b1"},
+                {"gamma", latex ? "\\gamma" : "\u03b3"},
+                {"delta", latex ? "\\delta" : "\u03b4"},
+                {"theta", latex ? "\\theta" : "\u03b8"},
+                {"lambda", latex ? "\\lambda" : "\u03bb"},
+                {"omega", latex ? "\\omega" : "\u03c9"},
+                {"sigma", latex ? "\\sigma" : "\u03c3"},
+                {"beta", latex ? "\\beta" : "\u03b2"},
+                {"zeta", latex ? "\\zeta" : "\u03b6"},
+                {"eta", latex ? "\\eta" : "\u03b7"},
+                {"mu", latex ? "\\mu" : "\u03bc"},
+                {"nu", latex ? "\\nu" : "\u03bd"},
+                {"xi", latex ? "\\xi" : "\u03be"},
+                {"pi", latex ? "\\pi" : "\u03c0"},
+                {"rho", latex ? "\\rho" : "\u03c1"},
+                {"tau", latex ? "\\tau" : "\u03c4"},
+                {"phi", latex ? "\\phi" : "\u03c6"}
+        };
+
+        StringBuilder out = new StringBuilder(text.length() + 8);
+        int i = 0;
+        while (i < text.length()) {
+            if (i > 0 && text.charAt(i - 1) == '\\') {
+                out.append(text.charAt(i));
+                i++;
+                continue;
+            }
+            boolean matched = false;
+            for (String[] pair : names) {
+                String name = pair[0];
+                if (regionMatchesIgnoreCase(text, i, name)) {
+                    out.append(pair[1]);
+                    i += name.length();
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) {
+                out.append(text.charAt(i));
+                i++;
+            }
+        }
+        return out.toString();
+    }
+
+    private String replaceScriptsPlain(String text, char marker, boolean superscript) {
+        StringBuilder out = new StringBuilder(text.length());
+        int i = 0;
+        while (i < text.length()) {
+            char c = text.charAt(i);
+            if (c != marker || i + 1 >= text.length()) {
+                out.append(c);
+                i++;
+                continue;
+            }
+
+            int next = i + 1;
+            String script;
+            if (text.charAt(next) == '{') {
+                int end = findMatchingBrace(text, next);
+                if (end < 0) {
+                    out.append(c);
+                    i++;
+                    continue;
+                }
+                script = text.substring(next + 1, end);
+                i = end + 1;
+            } else {
+                script = String.valueOf(text.charAt(next));
+                i = next + 1;
+            }
+            out.append(convertScript(script, superscript));
+        }
+        return out.toString();
+    }
+
+    private String convertScript(String script, boolean superscript) {
+        StringBuilder out = new StringBuilder(script.length());
+        for (int i = 0; i < script.length(); i++) {
+            String mapped = superscript ? superscriptChar(script.charAt(i)) : subscriptChar(script.charAt(i));
+            if (mapped == null) {
+                return (superscript ? "^(" : "_(") + script + ")";
+            }
+            out.append(mapped);
+        }
+        return out.toString();
+    }
+
+    private String superscriptChar(char c) {
+        switch (c) {
+            case '0': return "\u2070";
+            case '1': return "\u00b9";
+            case '2': return "\u00b2";
+            case '3': return "\u00b3";
+            case '4': return "\u2074";
+            case '5': return "\u2075";
+            case '6': return "\u2076";
+            case '7': return "\u2077";
+            case '8': return "\u2078";
+            case '9': return "\u2079";
+            case '+': return "\u207a";
+            case '-': return "\u207b";
+            case '=': return "\u207c";
+            case '(': return "\u207d";
+            case ')': return "\u207e";
+            case 'n': return "\u207f";
+            case 'i': return "\u2071";
+            default: return null;
+        }
+    }
+
+    private String subscriptChar(char c) {
+        switch (c) {
+            case '0': return "\u2080";
+            case '1': return "\u2081";
+            case '2': return "\u2082";
+            case '3': return "\u2083";
+            case '4': return "\u2084";
+            case '5': return "\u2085";
+            case '6': return "\u2086";
+            case '7': return "\u2087";
+            case '8': return "\u2088";
+            case '9': return "\u2089";
+            case '+': return "\u208a";
+            case '-': return "\u208b";
+            case '=': return "\u208c";
+            case '(': return "\u208d";
+            case ')': return "\u208e";
+            case 'a': return "\u2090";
+            case 'e': return "\u2091";
+            case 'h': return "\u2095";
+            case 'i': return "\u1d62";
+            case 'j': return "\u2c7c";
+            case 'k': return "\u2096";
+            case 'l': return "\u2097";
+            case 'm': return "\u2098";
+            case 'n': return "\u2099";
+            case 'o': return "\u2092";
+            case 'p': return "\u209a";
+            case 'r': return "\u1d63";
+            case 's': return "\u209b";
+            case 't': return "\u209c";
+            case 'u': return "\u1d64";
+            case 'v': return "\u1d65";
+            case 'x': return "\u2093";
+            default: return null;
+        }
     }
 
     private Bitmap renderTableBlock(TableBlock table) {
