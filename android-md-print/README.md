@@ -34,6 +34,12 @@ This is a personal project for maintaining personally owned old hardware.
 
 It does not include official app code, official assets, or brand resources. It does not pretend to be an official client, does not provide a commercial service, and is not meant for bulk resale or deployment. Brand and model names are only used to describe compatible hardware.
 
+## License
+
+MIT License. See [LICENSE](../LICENSE).
+
+This app is provided as-is, without warranty. Use it with hardware you own and at your own risk.
+
 ## 中文
 
 [English](#miao-markdown-android) | 中文
@@ -69,3 +75,9 @@ It does not include official app code, official assets, or brand resources. It d
 这是个人自用项目，只用于维护自己手里的旧设备。
 
 项目不包含官方 App 代码、官方素材或品牌资源；不冒充官方客户端；不提供商业服务；不建议用于批量销售或部署。品牌名和型号名只用于说明兼容设备。
+
+## 许可证
+
+MIT License，见 [LICENSE](../LICENSE)。
+
+项目按现状提供，不作担保。请只用于自己拥有的设备，风险自负。
