@@ -54,10 +54,15 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import io.noties.markwon.Markwon;
+import io.noties.markwon.AbstractMarkwonPlugin;
+import io.noties.markwon.core.MarkwonTheme;
+import io.noties.markwon.ext.latex.JLatexMathPlugin;
 import io.noties.markwon.ext.strikethrough.StrikethroughPlugin;
 import io.noties.markwon.ext.tables.TablePlugin;
 import io.noties.markwon.ext.tasklist.TaskListPlugin;
 import io.noties.markwon.html.HtmlPlugin;
+import io.noties.markwon.inlineparser.MarkwonInlineParserPlugin;
+import io.noties.markwon.linkify.LinkifyPlugin;
 
 public class MainActivity extends Activity {
     private static final int EDIT_REQUEST = 1001;
@@ -206,18 +211,6 @@ public class MainActivity extends Activity {
         statusCard.addView(feedRow);
         root.addView(statusCard, statusCardParams);
 
-        LinearLayout tabs = new LinearLayout(this);
-        tabs.setOrientation(LinearLayout.HORIZONTAL);
-        editTab = actionButton("编辑全文");
-        previewTab = actionButton("预览");
-        editTab.setOnClickListener(v -> openEditorPage());
-        previewTab.setOnClickListener(v -> showPreview());
-        tabs.addView(editTab, new LinearLayout.LayoutParams(0, -2, 1));
-        LinearLayout.LayoutParams previewTabParams = new LinearLayout.LayoutParams(0, -2, 1);
-        previewTabParams.setMargins(8, 0, 0, 0);
-        tabs.addView(previewTab, previewTabParams);
-        root.addView(tabs);
-
         editor = new EditText(this);
         editor.setTextSize(16);
         editor.setTextColor(Color.rgb(22, 31, 29));
@@ -262,34 +255,28 @@ public class MainActivity extends Activity {
         previewScroller.addView(previewPanel, new HorizontalScrollView.LayoutParams(-2, -1));
         previewScroller.setVisibility(View.GONE);
 
-        LinearLayout.LayoutParams editorParams = new LinearLayout.LayoutParams(-1, 0, 1);
-        editorParams.setMargins(0, 10, 0, 10);
-        root.addView(editorPanel, editorParams);
         LinearLayout.LayoutParams previewParams = new LinearLayout.LayoutParams(-1, 0, 1);
         previewParams.setMargins(0, 10, 0, 10);
         root.addView(previewScroller, previewParams);
 
-        LinearLayout sampleRow = new LinearLayout(this);
-        sampleRow.setOrientation(LinearLayout.HORIZONTAL);
-        sampleRow.setPadding(0, 0, 0, 8);
-        Button sample = actionButton("填入示例");
-        sample.setOnClickListener(v -> editor.setText("# Paperang P1\n\n- 原生安卓打印\n- Markdown 预览与纸上输出统一\n\n项目 | 结果\n--- | ---\n黑条 | OK\n文字 | OK\n\n`paperang` 应该是一行内正常长度。"));
-        Button classicConnect = actionButton("经典蓝牙");
+        LinearLayout connectRow = new LinearLayout(this);
+        connectRow.setOrientation(LinearLayout.HORIZONTAL);
+        connectRow.setPadding(0, 0, 0, 8);
+        Button classicConnect = primaryButton("连接打印机");
         classicConnect.setOnClickListener(v -> connectFirstPairedClassicDevice());
-        Button bleConnect = actionButton("BLE");
+        Button bleConnect = actionButton("BLE 备用");
         bleConnect.setOnClickListener(v -> startBleScan());
-        sampleRow.addView(sample, new LinearLayout.LayoutParams(0, -2, 1));
-        addRowButton(sampleRow, classicConnect);
-        addRowButton(sampleRow, bleConnect);
-        root.addView(sampleRow);
+        connectRow.addView(classicConnect, new LinearLayout.LayoutParams(0, -2, 2));
+        addRowButton(connectRow, bleConnect);
+        root.addView(connectRow);
 
         LinearLayout printRow = new LinearLayout(this);
         printRow.setOrientation(LinearLayout.HORIZONTAL);
-        Button stripe = primaryButton("黑条测试");
-        stripe.setOnClickListener(v -> printBlackStripe());
+        Button edit = actionButton("编辑");
+        edit.setOnClickListener(v -> openEditorPage());
         Button print = primaryButton("打印 Markdown");
         print.setOnClickListener(v -> printMarkdown());
-        printRow.addView(stripe, new LinearLayout.LayoutParams(0, -2, 1));
+        printRow.addView(edit, new LinearLayout.LayoutParams(0, -2, 1));
         addRowButton(printRow, print);
         root.addView(printRow);
 
@@ -381,14 +368,18 @@ public class MainActivity extends Activity {
 
     private void showPreview() {
         updatePreview();
-        editorPanel.setVisibility(View.GONE);
+        if (editorPanel != null) {
+            editorPanel.setVisibility(View.GONE);
+        }
         previewScroller.setVisibility(View.VISIBLE);
-        editTab.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        previewTab.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        editTab.setBackground(cardBackground(Color.rgb(246, 248, 246), Color.rgb(177, 191, 184), 8));
-        editTab.setTextColor(Color.rgb(23, 34, 31));
-        previewTab.setBackground(cardBackground(Color.rgb(29, 88, 74), Color.rgb(29, 88, 74), 8));
-        previewTab.setTextColor(Color.WHITE);
+        if (editTab != null && previewTab != null) {
+            editTab.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+            previewTab.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+            editTab.setBackground(cardBackground(Color.rgb(246, 248, 246), Color.rgb(177, 191, 184), 8));
+            editTab.setTextColor(Color.rgb(23, 34, 31));
+            previewTab.setBackground(cardBackground(Color.rgb(29, 88, 74), Color.rgb(29, 88, 74), 8));
+            previewTab.setTextColor(Color.WHITE);
+        }
     }
 
     @Override
@@ -410,6 +401,7 @@ public class MainActivity extends Activity {
         if (fontStatus != null) {
             fontStatus.setText("字号 " + Math.round(contentTextPx) + "px");
         }
+        markwon = null;
         preview.setTextSize(TypedValue.COMPLEX_UNIT_PX, contentTextPx);
         if (previewScroller.getVisibility() == View.VISIBLE) {
             updatePreview();
@@ -1298,6 +1290,20 @@ public class MainActivity extends Activity {
     private Markwon markdownRenderer() {
         if (markwon == null) {
             markwon = Markwon.builder(this)
+                    .usePlugin(new AbstractMarkwonPlugin() {
+                        @Override
+                        public void configureTheme(MarkwonTheme.Builder builder) {
+                            builder
+                                    .headingBreakHeight(0)
+                                    .headingTextSizeMultipliers(new float[]{1.55f, 1.32f, 1.16f, 1.05f, 1.0f, 0.95f})
+                                    .thematicBreakHeight(2)
+                                    .linkColor(Color.rgb(12, 92, 118))
+                                    .isLinkUnderlined(true);
+                        }
+                    })
+                    .usePlugin(MarkwonInlineParserPlugin.create())
+                    .usePlugin(JLatexMathPlugin.create(contentTextPx, Math.max(22f, contentTextPx * 1.15f), builder -> builder.inlinesEnabled(true)))
+                    .usePlugin(LinkifyPlugin.create())
                     .usePlugin(TablePlugin.create(builder -> builder
                             .tableBorderColor(Color.BLACK)
                             .tableBorderWidth(2)
