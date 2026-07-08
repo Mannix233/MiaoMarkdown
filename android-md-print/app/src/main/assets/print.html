@@ -1,0 +1,209 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <script>
+    window.MathJax = {
+      tex: {
+        inlineMath: [['$', '$'], ['\\(', '\\)']],
+        displayMath: [['$$', '$$'], ['\\[', '\\]']],
+        processEscapes: true,
+        packages: {'[+]': ['ams', 'boldsymbol', 'braket', 'cancel', 'color', 'configmacros', 'html', 'mathtools', 'mhchem', 'newcommand', 'physics', 'unicode']}
+      },
+      loader: {
+        load: ['[tex]/ams', '[tex]/boldsymbol', '[tex]/braket', '[tex]/cancel', '[tex]/color', '[tex]/configmacros', '[tex]/html', '[tex]/mathtools', '[tex]/mhchem', '[tex]/newcommand', '[tex]/physics', '[tex]/unicode']
+      },
+      svg: {
+        fontCache: 'none'
+      },
+      startup: {
+        typeset: false
+      }
+    };
+  </script>
+  <script src="mathjax-tex-svg-full.js"></script>
+  <script src="markdown-it.min.js"></script>
+  <style>
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      width: 384px;
+      min-height: 1px;
+      background: #fff;
+      color: #000;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Noto Sans", "Noto Sans CJK SC", sans-serif;
+      font-size: 19px;
+      line-height: 1.22;
+      -webkit-text-size-adjust: 100%;
+    }
+
+    #content {
+      box-sizing: border-box;
+      width: 384px;
+      padding: 22px;
+      overflow: hidden;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+      margin: 0.55em 0 0.35em;
+      line-height: 1.16;
+      font-weight: 700;
+      border: 0;
+    }
+
+    h1 { font-size: 1.55em; }
+    h2 { font-size: 1.32em; }
+    h3 { font-size: 1.16em; }
+    h4 { font-size: 1.05em; }
+    h5 { font-size: 1em; }
+    h6 { font-size: 0.95em; }
+
+    p,
+    ul,
+    ol,
+    blockquote,
+    pre,
+    table {
+      margin: 0 0 0.62em;
+    }
+
+    ul,
+    ol {
+      padding-left: 1.35em;
+    }
+
+    li {
+      margin: 0.12em 0;
+    }
+
+    blockquote {
+      border-left: 4px solid #000;
+      padding-left: 0.6em;
+    }
+
+    code,
+    pre {
+      font-family: "Droid Sans Mono", "Noto Mono", monospace;
+      font-size: 0.88em;
+    }
+
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      border: 1px solid #000;
+      padding: 0.5em;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 0.82em;
+      line-height: 1.18;
+      page-break-inside: avoid;
+    }
+
+    th,
+    td {
+      border: 2px solid #000;
+      padding: 5px;
+      vertical-align: top;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
+
+    th {
+      font-weight: 700;
+    }
+
+    hr {
+      height: 2px;
+      margin: 0.8em 0;
+      border: 0;
+      background: #000;
+    }
+
+    a {
+      color: #000;
+      text-decoration: underline;
+    }
+
+    mjx-container {
+      max-width: 100%;
+      overflow: hidden;
+    }
+
+    mjx-container[jax="SVG"] {
+      display: inline-block;
+      vertical-align: -0.12em;
+    }
+
+    td mjx-container[jax="SVG"],
+    th mjx-container[jax="SVG"] {
+      max-width: 100%;
+      font-size: 0.94em;
+    }
+
+    mjx-container[jax="SVG"][display="true"] {
+      display: block;
+      margin: 0.45em 0;
+      overflow: hidden;
+      text-align: left !important;
+    }
+
+    svg {
+      max-width: 100%;
+    }
+  </style>
+</head>
+<body>
+  <div id="content"></div>
+  <script>
+    const md = window.markdownit({
+      html: true,
+      linkify: true,
+      typographer: false,
+      breaks: false
+    });
+
+    function pageHeight() {
+      return Math.ceil(Math.max(
+        document.body.scrollHeight,
+        document.documentElement.scrollHeight,
+        document.getElementById('content').scrollHeight
+      ));
+    }
+
+    function normalizeMarkdown(source) {
+      return String(source || '')
+        .replace(/<script[\s\S]*?<\/script>/gi, '')
+        .replace(/<script\b[^>]*>/gi, '')
+        .replace(/^(\s*)-\s+\[\s\]\s+/gm, '$1- \u2610 ')
+        .replace(/^(\s*)-\s+\[[xX]\]\s+/gm, '$1- \u2611 ');
+    }
+
+    window.renderMarkdown = function renderMarkdown(source, textPx) {
+      document.body.style.fontSize = String(textPx || 19) + 'px';
+      const content = document.getElementById('content');
+      const normalized = normalizeMarkdown(source);
+      content.innerHTML = md.render(normalized);
+
+      return MathJax.startup.promise
+        .then(function () {
+          MathJax.typesetClear([content]);
+          return MathJax.typesetPromise([content]);
+        })
+        .then(function () {
+          return String(pageHeight());
+        })
+        .catch(function (error) {
+          content.innerHTML = '<pre></pre>';
+          content.querySelector('pre').textContent = String(source || '') + '\n\nMath render error: ' + error.message;
+          return String(pageHeight());
+        });
+    };
+  </script>
+</body>
+</html>

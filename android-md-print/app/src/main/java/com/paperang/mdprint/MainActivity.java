@@ -32,6 +32,10 @@ import android.text.InputType;
 import android.text.TextWatcher;
 import android.util.TypedValue;
 import android.view.View;
+import android.webkit.JavascriptInterface;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.HorizontalScrollView;
@@ -56,13 +60,12 @@ import java.util.concurrent.Executors;
 import io.noties.markwon.Markwon;
 import io.noties.markwon.AbstractMarkwonPlugin;
 import io.noties.markwon.core.MarkwonTheme;
-import io.noties.markwon.ext.latex.JLatexMathPlugin;
 import io.noties.markwon.ext.strikethrough.StrikethroughPlugin;
 import io.noties.markwon.ext.tables.TablePlugin;
 import io.noties.markwon.ext.tasklist.TaskListPlugin;
 import io.noties.markwon.html.HtmlPlugin;
-import io.noties.markwon.inlineparser.MarkwonInlineParserPlugin;
 import io.noties.markwon.linkify.LinkifyPlugin;
+import org.json.JSONObject;
 
 public class MainActivity extends Activity {
     private static final int EDIT_REQUEST = 1001;
@@ -105,6 +108,7 @@ public class MainActivity extends Activity {
     private TextView densityStatus;
     private TextView feedStatus;
     private TextView status;
+    private WebView previewWebView;
     private ScrollView editorPanel;
     private ScrollView previewPanel;
     private HorizontalScrollView previewScroller;
@@ -116,6 +120,9 @@ public class MainActivity extends Activity {
     private BluetoothSocket classicSocket;
     private OutputStream classicOutput;
     private Markwon markwon;
+    private boolean webRendererReady = false;
+    private int webRenderRequestId = 0;
+    private RenderCallback pendingRenderCallback;
     private float contentTextPx = DEFAULT_CONTENT_TEXT_PX;
     private int printDensity = 75;
     private float postPrintFeedMm = 5f;
@@ -244,11 +251,12 @@ public class MainActivity extends Activity {
         editorPanel.addView(editor, new ScrollView.LayoutParams(-1, -2));
 
         preview = createPaperView();
+        previewWebView = createPreviewWebView();
         previewPanel = new ScrollView(this);
         previewPanel.setFillViewport(true);
         previewPanel.setBackgroundColor(Color.rgb(229, 234, 231));
         previewPanel.setPadding(18, 18, 18, 28);
-        previewPanel.addView(preview, new ScrollView.LayoutParams(WIDTH_PX, -2));
+        previewPanel.addView(previewWebView, new ScrollView.LayoutParams(WIDTH_PX, MIN_PRINT_HEIGHT_PX));
         previewScroller = new HorizontalScrollView(this);
         previewScroller.setFillViewport(false);
         previewScroller.setBackground(cardBackground(Color.rgb(224, 230, 226), Color.rgb(184, 196, 190), 8));
@@ -392,8 +400,7 @@ public class MainActivity extends Activity {
     }
 
     private void updatePreview() {
-        markdownRenderer().setMarkdown(preview, prepareMarkdownForPaper(editor.getText().toString()));
-        updateEstimate(measureThermalHeight(editor.getText().toString()));
+        renderMarkdownInWebView(null);
     }
 
     private void adjustTextSize(float deltaPx) {
@@ -627,13 +634,14 @@ public class MainActivity extends Activity {
 
     private void printMarkdown() {
         if (!ready()) return;
-        RenderedPaper paper = renderMarkdown(editor.getText().toString());
-        updateEstimate(paper.heightPx);
-        if (paper.tableCount > 0) {
-            log("表格已使用热敏模式重排：" + paper.tableCount + " 个。");
-        }
-        log("打印预估：宽 384px，高 " + paper.heightPx + "px，约 " + formatMm(estimateLengthMm(paper.heightPx)) + "mm");
-        sendImage(paper.bytes);
+        log("Rendering Markdown and formulas...");
+        showPreview();
+        renderMarkdownInWebView(height -> handler.postDelayed(() -> {
+            RenderedPaper paper = renderWebPaper(height);
+            updateEstimate(paper.heightPx);
+            log("Print estimate: width 384px, height " + paper.heightPx + "px, about " + formatMm(estimateLengthMm(paper.heightPx)) + "mm");
+            sendImage(paper.bytes);
+        }, 180));
     }
 
     private void sendImage(byte[] image) {
@@ -650,6 +658,24 @@ public class MainActivity extends Activity {
         sendRaw(pack(26, int16le(feedUnits()), 0));
         int heightPx = image.length / WIDTH_BYTES;
         log("已入队：宽 384px，高 " + heightPx + "px，数据 " + image.length + " bytes，内容约 " + formatMm(estimateLengthMm(heightPx)) + "mm，尾纸 " + formatMm(postPrintFeedMm) + "mm");
+    }
+
+    private RenderedPaper renderWebPaper(int requestedHeight) {
+        int height = Math.max(MIN_PRINT_HEIGHT_PX, Math.min(MAX_PRINT_HEIGHT_PX, requestedHeight));
+        if (previewWebView == null) {
+            return renderMarkdown(editor.getText().toString());
+        }
+        setPreviewWebViewHeight(height);
+        int widthSpec = View.MeasureSpec.makeMeasureSpec(WIDTH_PX, View.MeasureSpec.EXACTLY);
+        int heightSpec = View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY);
+        previewWebView.measure(widthSpec, heightSpec);
+        previewWebView.layout(0, 0, WIDTH_PX, height);
+
+        Bitmap bitmap = Bitmap.createBitmap(WIDTH_PX, height, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        canvas.drawColor(Color.WHITE);
+        previewWebView.draw(canvas);
+        return new RenderedPaper(encodeBitmap(bitmap), height, 0);
     }
 
     private RenderedPaper renderMarkdown(String markdown) {
@@ -712,6 +738,101 @@ public class MainActivity extends Activity {
         paper.setMaxWidth(WIDTH_PX);
         paper.setWidth(WIDTH_PX);
         return paper;
+    }
+
+    private WebView createPreviewWebView() {
+        WebView webView = new WebView(this);
+        webView.setBackgroundColor(Color.WHITE);
+        webView.setVerticalScrollBarEnabled(false);
+        webView.setHorizontalScrollBarEnabled(false);
+        WebSettings settings = webView.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setAllowFileAccess(true);
+        settings.setAllowContentAccess(false);
+        settings.setDomStorageEnabled(false);
+        settings.setLoadsImagesAutomatically(true);
+        webView.addJavascriptInterface(new RenderBridge(), "AndroidRenderer");
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                webRendererReady = true;
+                renderMarkdownInWebView(height -> {
+                    int h = Math.max(MIN_PRINT_HEIGHT_PX, Math.min(MAX_PRINT_HEIGHT_PX, height));
+                    setPreviewWebViewHeight(h);
+                    updateEstimate(h);
+                });
+            }
+        });
+        webView.loadUrl("file:///android_asset/print.html");
+        return webView;
+    }
+
+    private void renderMarkdownInWebView(RenderCallback callback) {
+        if (previewWebView == null) {
+            if (callback != null) {
+                callback.onHeight(measureThermalHeight(editor.getText().toString()));
+            }
+            return;
+        }
+        if (!webRendererReady) {
+            previewWebView.postDelayed(() -> renderMarkdownInWebView(callback), 120);
+            return;
+        }
+        String markdown = prepareMarkdownForPaper(editor.getText().toString());
+        int requestId = ++webRenderRequestId;
+        pendingRenderCallback = callback;
+        String js = "renderMarkdown(" + JSONObject.quote(markdown) + "," + Math.round(contentTextPx) + ")"
+                + ".then(function(h){AndroidRenderer.onRendered(" + requestId + ", String(h));})"
+                + ".catch(function(){AndroidRenderer.onRendered(" + requestId + ", '165');});";
+        previewWebView.evaluateJavascript(js, null);
+    }
+
+    private int parseJsHeight(String value) {
+        if (value == null) {
+            return MIN_PRINT_HEIGHT_PX;
+        }
+        String cleaned = value.replace("\"", "").trim();
+        try {
+            return Math.max(MIN_PRINT_HEIGHT_PX, Math.min(MAX_PRINT_HEIGHT_PX, Math.round(Float.parseFloat(cleaned))));
+        } catch (NumberFormatException e) {
+            return MIN_PRINT_HEIGHT_PX;
+        }
+    }
+
+    private void setPreviewWebViewHeight(int height) {
+        if (previewWebView == null) {
+            return;
+        }
+        int h = Math.max(MIN_PRINT_HEIGHT_PX, Math.min(MAX_PRINT_HEIGHT_PX, height));
+        android.view.ViewGroup.LayoutParams params = previewWebView.getLayoutParams();
+        if (params != null && params.height != h) {
+            params.height = h;
+            params.width = WIDTH_PX;
+            previewWebView.setLayoutParams(params);
+        }
+    }
+
+    private interface RenderCallback {
+        void onHeight(int height);
+    }
+
+    private class RenderBridge {
+        @JavascriptInterface
+        public void onRendered(int requestId, String heightValue) {
+            handler.post(() -> {
+                if (requestId != webRenderRequestId) {
+                    return;
+                }
+                int height = parseJsHeight(heightValue);
+                setPreviewWebViewHeight(height);
+                updateEstimate(height);
+                RenderCallback callback = pendingRenderCallback;
+                pendingRenderCallback = null;
+                if (callback != null) {
+                    callback.onHeight(height);
+                }
+            });
+        }
     }
 
     private int measurePaperView(TextView paper) {
@@ -783,7 +904,7 @@ public class MainActivity extends Activity {
         StringBuilder out = new StringBuilder(normalized.length() + 32);
         for (int i = 0; i < lines.length; i++) {
             String line = prepareLineMathForPreview(lines[i]);
-            out.append(line.indexOf('|') >= 0 ? addTableBreakpoints(line) : line);
+            out.append(line);
             if (i < lines.length - 1) {
                 out.append('\n');
             }
@@ -1784,8 +1905,6 @@ public class MainActivity extends Activity {
                                     .isLinkUnderlined(true);
                         }
                     })
-                    .usePlugin(MarkwonInlineParserPlugin.create())
-                    .usePlugin(JLatexMathPlugin.create(contentTextPx, Math.max(22f, contentTextPx * 1.15f), builder -> builder.inlinesEnabled(true)))
                     .usePlugin(LinkifyPlugin.create())
                     .usePlugin(TablePlugin.create(builder -> builder
                             .tableBorderColor(Color.BLACK)
