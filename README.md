@@ -4,7 +4,7 @@ English | [中文](#中文)
 
 An Android Markdown printing tool for an old Paperang P1.
 
-P1 is an early pocket thermal printer. Paperang has many newer models now; this project mainly exists to keep my old P1 useful with a modern Android phone. It is not an official app and not a universal Paperang client.
+P1 is an early pocket thermal printer. Paperang has many newer models now; this project mainly exists to keep my old P1 useful with a Android phone. It is not an official app and not a universal Paperang client.
 
 ## Features
 
@@ -16,8 +16,6 @@ P1 is an early pocket thermal printer. Paperang has many newer models now; this 
 
 ## Markdown
 
-The goal is to support everyday Typora-style notes as much as practical.
-
 Currently covered:
 
 - Headings, paragraphs, bold, italic, strikethrough
@@ -28,7 +26,7 @@ Currently covered:
 - Basic HTML
 - LaTeX formulas
 
-Mermaid, complex diagrams, images, and Typora theme CSS are not fully supported yet.
+Mermaid, complex diagrams, images, and theme CSS are not fully supported yet.
 
 ## Note
 
