@@ -254,11 +254,11 @@ public class MainActivity extends Activity {
 
         preview = createPaperView();
         previewWebView = createPreviewWebView();
-        root.addView(previewWebView, new LinearLayout.LayoutParams(WIDTH_PX, 1));
         previewImage = new ImageView(this);
         previewImage.setBackgroundColor(Color.WHITE);
         previewImage.setAdjustViewBounds(true);
-        previewImage.setScaleType(ImageView.ScaleType.FIT_START);
+        previewImage.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        previewImage.setMinimumWidth(WIDTH_PX);
         previewPanel = new ScrollView(this);
         previewPanel.setFillViewport(true);
         previewPanel.setBackgroundColor(Color.rgb(229, 234, 231));
@@ -828,12 +828,6 @@ public class MainActivity extends Activity {
     private void setPreviewWebViewHeight(int height) {
         if (previewWebView == null) {
             return;
-        }
-        android.view.ViewGroup.LayoutParams params = previewWebView.getLayoutParams();
-        if (params != null && (params.width != WIDTH_PX || params.height != 1)) {
-            params.height = 1;
-            params.width = WIDTH_PX;
-            previewWebView.setLayoutParams(params);
         }
     }
 

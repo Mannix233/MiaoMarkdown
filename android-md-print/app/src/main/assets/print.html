@@ -213,21 +213,40 @@
       return (cell && cell.textContent ? cell.textContent : '').replace(/\s+/g, ' ').trim();
     }
 
+    function tableColumnCount(table) {
+      return Array.from(table.querySelectorAll('tr'))
+        .reduce((max, row) => Math.max(max, row.children.length), 0);
+    }
+
+    function hasHorizontalOverflow(node) {
+      return node && (node.scrollWidth - node.clientWidth > 2);
+    }
+
+    function shrinkTableToFit(table) {
+      const fontSteps = [0.82, 0.78, 0.74, 0.7, 0.66];
+      for (const size of fontSteps) {
+        table.style.fontSize = size.toFixed(2) + 'em';
+        fitMath(table);
+        if (!hasHorizontalOverflow(table)) {
+          return true;
+        }
+      }
+      return !hasHorizontalOverflow(table);
+    }
+
     function shouldStackTable(table) {
-      const rows = Array.from(table.querySelectorAll('tr'));
-      const colCount = rows.reduce((max, row) => Math.max(max, row.children.length), 0);
-      const cells = Array.from(table.querySelectorAll('th,td'));
-      const hasMath = cells.some(cell => cell.querySelector('mjx-container'));
-      const hasLongCell = cells.some(cell => cellText(cell).length > 24);
-      const tooTallForGrid = colCount >= 3 && (hasMath || hasLongCell);
-      return colCount >= 4 || tooTallForGrid;
+      const colCount = tableColumnCount(table);
+      if (colCount >= 4) return true;
+      if (colCount <= 1) return false;
+      if (shrinkTableToFit(table)) return false;
+      return colCount >= 3;
     }
 
     function stackWideTables(root) {
       Array.from(root.querySelectorAll('table')).forEach(table => {
         if (!shouldStackTable(table)) return;
         const headerCells = Array.from(table.querySelectorAll('tr:first-child th, tr:first-child td'));
-        const headers = headerCells.map((cell, index) => cellText(cell) || ('Column ' + (index + 1)));
+        const headers = headerCells.map(cell => cellText(cell));
         const dataRows = Array.from(table.querySelectorAll('tr')).slice(1);
         const wrapper = document.createElement('div');
         wrapper.className = 'stack-table';
@@ -238,10 +257,13 @@
           Array.from(row.children).forEach((cell, index) => {
             const field = document.createElement('div');
             field.className = 'stack-field';
-            const key = document.createElement('span');
-            key.className = 'stack-key';
-            key.textContent = (headers[index] || ('Column ' + (index + 1))) + ': ';
-            field.appendChild(key);
+            const keyText = headers[index] || '';
+            if (keyText) {
+              const key = document.createElement('span');
+              key.className = 'stack-key';
+              key.textContent = keyText + ': ';
+              field.appendChild(key);
+            }
             const value = document.createElement('span');
             value.innerHTML = cell.innerHTML;
             field.appendChild(value);
