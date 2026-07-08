@@ -38,7 +38,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.EditText;
-import android.widget.HorizontalScrollView;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -91,10 +91,12 @@ public class MainActivity extends Activity {
     private static final int FEED_UNITS_PER_MM = 56;
     private static final int MIN_PRINT_HEIGHT_PX = 165;
     private static final int MAX_PRINT_HEIGHT_PX = 12000;
+    private static final int PREVIEW_RENDER_DEBOUNCE_MS = 110;
     private static final int STANDARD_CRC_KEY = 0x35769521;
     private static final int SESSION_CRC_KEY = 0x06968634 ^ 0x002e696d;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Runnable previewRefreshRunnable = () -> renderMarkdownInWebView(null);
     private final Queue<byte[]> bleWriteQueue = new ArrayDeque<>();
     private final ExecutorService classicWriter = Executors.newSingleThreadExecutor();
     private boolean bleWriting = false;
@@ -113,7 +115,8 @@ public class MainActivity extends Activity {
     private ImageView previewImage;
     private ScrollView editorPanel;
     private ScrollView previewPanel;
-    private HorizontalScrollView previewScroller;
+    private ScrollView previewScroller;
+    private FrameLayout previewRenderHost;
     private Button editTab;
     private Button previewTab;
     private BluetoothGatt gatt;
@@ -124,6 +127,7 @@ public class MainActivity extends Activity {
     private Markwon markwon;
     private boolean webRendererReady = false;
     private int webRenderRequestId = 0;
+    private int appliedRenderRequestId = 0;
     private RenderCallback pendingRenderCallback;
     private float contentTextPx = DEFAULT_CONTENT_TEXT_PX;
     private int printDensity = 75;
@@ -236,7 +240,7 @@ public class MainActivity extends Activity {
             @Override
             public void onTextChanged(CharSequence s, int start, int before, int count) {
                 if (previewScroller != null && previewScroller.getVisibility() == View.VISIBLE) {
-                    updatePreview();
+                    schedulePreviewUpdate();
                 } else if (estimateStatus != null) {
                     updateEstimate();
                 }
@@ -258,21 +262,36 @@ public class MainActivity extends Activity {
         previewImage.setBackgroundColor(Color.WHITE);
         previewImage.setAdjustViewBounds(true);
         previewImage.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        previewImage.setMinimumWidth(WIDTH_PX);
+        previewImage.setMinimumHeight(MIN_PRINT_HEIGHT_PX);
+        LinearLayout previewStage = new LinearLayout(this);
+        previewStage.setOrientation(LinearLayout.VERTICAL);
+        previewStage.setGravity(android.view.Gravity.CENTER_HORIZONTAL);
+        previewStage.setBackgroundColor(Color.rgb(229, 234, 231));
+        previewStage.setPadding(18, 18, 18, 28);
+        LinearLayout previewPaper = panel(Color.WHITE, Color.rgb(188, 200, 194));
+        previewPaper.addView(previewImage, new LinearLayout.LayoutParams(-1, -2));
         previewPanel = new ScrollView(this);
         previewPanel.setFillViewport(true);
-        previewPanel.setBackgroundColor(Color.rgb(229, 234, 231));
-        previewPanel.setPadding(18, 18, 18, 28);
-        previewPanel.addView(previewImage, new ScrollView.LayoutParams(-1, -2));
-        previewScroller = new HorizontalScrollView(this);
+        previewPanel.setBackgroundColor(Color.TRANSPARENT);
+        previewPanel.addView(previewStage, new ScrollView.LayoutParams(-1, -2));
+        previewStage.addView(previewPaper, new LinearLayout.LayoutParams(-1, -2));
+        previewScroller = new ScrollView(this);
         previewScroller.setFillViewport(true);
         previewScroller.setBackground(cardBackground(Color.rgb(224, 230, 226), Color.rgb(184, 196, 190), 8));
-        previewScroller.addView(previewPanel, new HorizontalScrollView.LayoutParams(-1, -1));
+        previewScroller.addView(previewPanel, new ScrollView.LayoutParams(-1, -1));
         previewScroller.setVisibility(View.GONE);
 
         LinearLayout.LayoutParams previewParams = new LinearLayout.LayoutParams(-1, 0, 1);
         previewParams.setMargins(0, 10, 0, 10);
         root.addView(previewScroller, previewParams);
+
+        previewRenderHost = new FrameLayout(this);
+        previewRenderHost.setAlpha(0f);
+        previewRenderHost.setClickable(false);
+        previewRenderHost.setFocusable(false);
+        previewRenderHost.setClipChildren(false);
+        previewRenderHost.addView(previewWebView, new FrameLayout.LayoutParams(WIDTH_PX, 1));
+        root.addView(previewRenderHost, new LinearLayout.LayoutParams(WIDTH_PX, 1));
 
         LinearLayout connectRow = new LinearLayout(this);
         connectRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -382,11 +401,12 @@ public class MainActivity extends Activity {
     }
 
     private void showPreview() {
-        updatePreview();
+        refreshPreviewNow();
         if (editorPanel != null) {
             editorPanel.setVisibility(View.GONE);
         }
         previewScroller.setVisibility(View.VISIBLE);
+        previewScroller.post(() -> previewScroller.scrollTo(0, 0));
         if (editTab != null && previewTab != null) {
             editTab.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
             previewTab.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
@@ -407,6 +427,16 @@ public class MainActivity extends Activity {
     }
 
     private void updatePreview() {
+        schedulePreviewUpdate();
+    }
+
+    private void schedulePreviewUpdate() {
+        handler.removeCallbacks(previewRefreshRunnable);
+        handler.postDelayed(previewRefreshRunnable, PREVIEW_RENDER_DEBOUNCE_MS);
+    }
+
+    private void refreshPreviewNow() {
+        handler.removeCallbacks(previewRefreshRunnable);
         renderMarkdownInWebView(null);
     }
 
@@ -418,7 +448,7 @@ public class MainActivity extends Activity {
         markwon = null;
         preview.setTextSize(TypedValue.COMPLEX_UNIT_PX, contentTextPx);
         if (previewScroller.getVisibility() == View.VISIBLE) {
-            updatePreview();
+            schedulePreviewUpdate();
         } else {
             updateEstimate();
         }
@@ -643,12 +673,12 @@ public class MainActivity extends Activity {
         if (!ready()) return;
         log("Rendering Markdown and formulas...");
         showPreview();
-        renderMarkdownInWebView(height -> handler.postDelayed(() -> {
+        renderMarkdownInWebView(height -> {
             RenderedPaper paper = renderWebPaper(height);
             updateEstimate(paper.heightPx);
             log("Print estimate: width 384px, height " + paper.heightPx + "px, about " + formatMm(estimateLengthMm(paper.heightPx)) + "mm");
             sendImage(paper.bytes);
-        }, 180));
+        });
     }
 
     private void sendImage(byte[] image) {
@@ -776,17 +806,14 @@ public class MainActivity extends Activity {
         settings.setSupportZoom(false);
         settings.setBuiltInZoomControls(false);
         settings.setDisplayZoomControls(false);
+        webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
         webView.setInitialScale(100);
         webView.addJavascriptInterface(new RenderBridge(), "AndroidRenderer");
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageFinished(WebView view, String url) {
                 webRendererReady = true;
-                renderMarkdownInWebView(height -> {
-                    int h = Math.max(MIN_PRINT_HEIGHT_PX, Math.min(MAX_PRINT_HEIGHT_PX, height));
-                    setPreviewWebViewHeight(h);
-                    updateEstimate(h);
-                });
+                renderMarkdownInWebView(null);
             }
         });
         webView.loadUrl("file:///android_asset/print.html");
@@ -806,8 +833,9 @@ public class MainActivity extends Activity {
         }
         String markdown = prepareMarkdownForPaper(editor.getText().toString());
         int requestId = ++webRenderRequestId;
+        appliedRenderRequestId = 0;
         pendingRenderCallback = callback;
-        String js = "renderMarkdown(" + JSONObject.quote(markdown) + "," + Math.round(contentTextPx) + ")"
+        String js = "renderMarkdown(" + JSONObject.quote(markdown) + "," + Math.round(contentTextPx) + "," + requestId + ")"
                 + ".then(function(h){AndroidRenderer.onRendered(" + requestId + ", String(h));})"
                 + ".catch(function(){AndroidRenderer.onRendered(" + requestId + ", '165');});";
         previewWebView.evaluateJavascript(js, null);
@@ -829,6 +857,33 @@ public class MainActivity extends Activity {
         if (previewWebView == null) {
             return;
         }
+        int clampedHeight = Math.max(MIN_PRINT_HEIGHT_PX, Math.min(MAX_PRINT_HEIGHT_PX, height));
+        FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) previewWebView.getLayoutParams();
+        if (params == null) {
+            params = new FrameLayout.LayoutParams(WIDTH_PX, clampedHeight);
+        } else {
+            params.width = WIDTH_PX;
+            params.height = clampedHeight;
+        }
+        previewWebView.setLayoutParams(params);
+        int widthSpec = View.MeasureSpec.makeMeasureSpec(WIDTH_PX, View.MeasureSpec.EXACTLY);
+        int heightSpec = View.MeasureSpec.makeMeasureSpec(clampedHeight, View.MeasureSpec.EXACTLY);
+        previewWebView.measure(widthSpec, heightSpec);
+        previewWebView.layout(0, 0, WIDTH_PX, clampedHeight);
+    }
+
+    private void completeRenderedPreview(int requestId, int height) {
+        if (requestId != webRenderRequestId || requestId == appliedRenderRequestId) {
+            return;
+        }
+        appliedRenderRequestId = requestId;
+        updateEstimate(height);
+        updatePreviewImage(height);
+        RenderCallback callback = pendingRenderCallback;
+        pendingRenderCallback = null;
+        if (callback != null) {
+            callback.onHeight(height);
+        }
     }
 
     private interface RenderCallback {
@@ -842,15 +897,18 @@ public class MainActivity extends Activity {
                 if (requestId != webRenderRequestId) {
                     return;
                 }
+                if ("__STALE__".equals(heightValue)) {
+                    return;
+                }
                 int height = parseJsHeight(heightValue);
                 setPreviewWebViewHeight(height);
-                updateEstimate(height);
-                updatePreviewImage(height);
-                RenderCallback callback = pendingRenderCallback;
-                pendingRenderCallback = null;
-                if (callback != null) {
-                    callback.onHeight(height);
-                }
+                previewWebView.postVisualStateCallback(requestId, new WebView.VisualStateCallback() {
+                    @Override
+                    public void onComplete(long requestToken) {
+                        handler.post(() -> completeRenderedPreview(requestId, height));
+                    }
+                });
+                handler.postDelayed(() -> completeRenderedPreview(requestId, height), 180);
             });
         }
     }
@@ -955,27 +1013,6 @@ public class MainActivity extends Activity {
         if (line == null || line.length() == 0) {
             return "";
         }
-        if (line.indexOf('|') >= 0 && !isLooseSeparatorLine(line)) {
-            String trimmed = line.trim();
-            boolean leadingPipe = trimmed.startsWith("|");
-            boolean trailingPipe = trimmed.endsWith("|");
-            String[] cells = splitTableCells(line);
-            StringBuilder out = new StringBuilder(line.length() + 16);
-            if (leadingPipe) {
-                out.append("| ");
-            }
-            for (int i = 0; i < cells.length; i++) {
-                if (i > 0) {
-                    out.append(" | ");
-                }
-                out.append(prepareMathCellForPreview(cells[i].trim()));
-            }
-            if (trailingPipe) {
-                out.append(" |");
-            }
-            return out.toString();
-        }
-
         String trimmed = line.trim();
         if (looksLikeFormula(trimmed) && isMostlyFormulaText(trimmed) && !hasMathDelimiters(trimmed)) {
             int leading = line.indexOf(trimmed);

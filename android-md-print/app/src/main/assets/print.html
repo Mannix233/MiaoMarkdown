@@ -99,7 +99,7 @@
     table {
       width: 100%;
       border-collapse: collapse;
-      table-layout: fixed;
+      table-layout: auto;
       font-size: 0.82em;
       line-height: 1.18;
       page-break-inside: avoid;
@@ -110,12 +110,22 @@
       border: 2px solid #000;
       padding: 5px;
       vertical-align: top;
-      word-break: break-word;
-      overflow-wrap: anywhere;
+      word-break: normal;
+      overflow-wrap: break-word;
     }
 
     th {
       font-weight: 700;
+    }
+
+    th > :last-child,
+    td > :last-child {
+      margin-bottom: 0;
+    }
+
+    .math-cell {
+      text-align: center;
+      vertical-align: middle;
     }
 
     .stack-table {
@@ -162,13 +172,19 @@
 
     mjx-container[jax="SVG"] {
       display: inline-block;
-      vertical-align: -0.12em;
+      vertical-align: -0.08em;
     }
 
     td mjx-container[jax="SVG"],
     th mjx-container[jax="SVG"] {
       max-width: 100%;
-      font-size: 0.94em;
+      font-size: 0.93em;
+    }
+
+    .math-cell mjx-container[jax="SVG"] {
+      display: block;
+      margin: 0 auto;
+      vertical-align: 0;
     }
 
     mjx-container[jax="SVG"][display="true"] {
@@ -192,6 +208,7 @@
       typographer: false,
       breaks: false
     });
+    let activeRenderRequestId = 0;
 
     function pageHeight() {
       return Math.ceil(Math.max(
@@ -213,17 +230,55 @@
       return (cell && cell.textContent ? cell.textContent : '').replace(/\s+/g, ' ').trim();
     }
 
+    function isActiveRequest(requestId) {
+      return requestId === activeRenderRequestId;
+    }
+
+    function settleLayout() {
+      return new Promise(resolve => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(resolve);
+        });
+      });
+    }
+
     function tableColumnCount(table) {
       return Array.from(table.querySelectorAll('tr'))
         .reduce((max, row) => Math.max(max, row.children.length), 0);
     }
 
+    function tableHasComplexContent(table) {
+      return !!(table && table.querySelector('mjx-container, code, pre'));
+    }
+
     function hasHorizontalOverflow(node) {
-      return node && (node.scrollWidth - node.clientWidth > 2);
+      if (!node) return false;
+      if (node.scrollWidth - node.clientWidth > 2) return true;
+      return Array.from(node.querySelectorAll('th, td, mjx-container, svg')).some(child => {
+        const parent = child.parentElement;
+        if (!parent) return false;
+        return child.getBoundingClientRect().width - parent.getBoundingClientRect().width > 2;
+      });
+    }
+
+    function markMathCells(root) {
+      Array.from(root.querySelectorAll('th, td')).forEach(cell => {
+        cell.classList.remove('math-cell');
+        const math = cell.children.length === 1 ? cell.children[0] : null;
+        if (!math || math.tagName !== 'MJX-CONTAINER') return;
+        const onlyMath = Array.from(cell.childNodes).every(node => {
+          return node === math || (node.nodeType === Node.TEXT_NODE && !node.textContent.trim());
+        });
+        if (onlyMath) {
+          cell.classList.add('math-cell');
+        }
+      });
     }
 
     function shrinkTableToFit(table) {
-      const fontSteps = [0.82, 0.78, 0.74, 0.7, 0.66];
+      const fontSteps = tableHasComplexContent(table)
+        ? [0.8, 0.76, 0.72, 0.68, 0.64, 0.6, 0.56]
+        : [0.82, 0.78, 0.74, 0.7, 0.66];
       for (const size of fontSteps) {
         table.style.fontSize = size.toFixed(2) + 'em';
         fitMath(table);
@@ -236,22 +291,33 @@
 
     function shouldStackTable(table) {
       const colCount = tableColumnCount(table);
+      const hasComplexContent = tableHasComplexContent(table);
       if (colCount >= 4) return true;
       if (colCount <= 1) return false;
+      if (colCount === 3 && hasComplexContent) {
+        shrinkTableToFit(table);
+        return false;
+      }
       if (shrinkTableToFit(table)) return false;
-      return colCount >= 3;
+      return colCount >= 3 && !hasComplexContent;
     }
 
     function stackWideTables(root) {
       Array.from(root.querySelectorAll('table')).forEach(table => {
         if (!shouldStackTable(table)) return;
-        const headerCells = Array.from(table.querySelectorAll('tr:first-child th, tr:first-child td'));
+        const headerRow = table.tHead && table.tHead.rows.length ? table.tHead.rows[0] : table.rows[0];
+        if (!headerRow) return;
+        const headerCells = Array.from(headerRow.cells);
         const headers = headerCells.map(cell => cellText(cell));
-        const dataRows = Array.from(table.querySelectorAll('tr')).slice(1);
+        const bodyRows = table.tBodies.length
+          ? Array.from(table.tBodies).reduce((rows, section) => rows.concat(Array.from(section.rows)), [])
+          : Array.from(table.rows).slice(1);
+        const maxColumns = bodyRows.reduce((max, row) => Math.max(max, row.cells.length), 0);
+        if (!bodyRows.length || maxColumns !== headers.length) return;
         const wrapper = document.createElement('div');
         wrapper.className = 'stack-table';
 
-        dataRows.forEach(row => {
+        bodyRows.forEach(row => {
           const rowBox = document.createElement('div');
           rowBox.className = 'stack-row';
           Array.from(row.children).forEach((cell, index) => {
@@ -289,7 +355,8 @@
       });
     }
 
-    window.renderMarkdown = function renderMarkdown(source, textPx) {
+    window.renderMarkdown = function renderMarkdown(source, textPx, requestId) {
+      activeRenderRequestId = requestId || 0;
       document.body.style.fontSize = String(textPx || 19) + 'px';
       const content = document.getElementById('content');
       const normalized = normalizeMarkdown(source);
@@ -297,19 +364,31 @@
 
       return MathJax.startup.promise
         .then(function () {
+          if (!isActiveRequest(requestId)) return '__STALE__';
           MathJax.typesetClear([content]);
           return MathJax.typesetPromise([content]);
         })
         .then(function () {
+          if (!isActiveRequest(requestId)) return '__STALE__';
+          markMathCells(content);
           fitMath(content);
           stackWideTables(content);
           return MathJax.typesetPromise([content]);
         })
         .then(function () {
+          if (!isActiveRequest(requestId)) return '__STALE__';
+          markMathCells(content);
           fitMath(content);
+          return settleLayout();
+        })
+        .then(function () {
+          if (!isActiveRequest(requestId)) return '__STALE__';
           return String(pageHeight());
         })
         .catch(function (error) {
+          if (!isActiveRequest(requestId) || (error && error.message === '__STALE__')) {
+            return '__STALE__';
+          }
           content.innerHTML = '<pre></pre>';
           content.querySelector('pre').textContent = String(source || '') + '\n\nMath render error: ' + error.message;
           return String(pageHeight());
