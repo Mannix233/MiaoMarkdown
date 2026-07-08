@@ -1,6 +1,6 @@
 # Miao MD Print Android
 
-Native Android prototype for Miaomiaoji/Paperang P1 Markdown printing.
+Native Android prototype for Paperang P1 Markdown printing.
 
 This project is intended to be built in the cloud with GitHub Actions, so this PC does not need Android Studio, Android SDK, Gradle, or an emulator.
 
