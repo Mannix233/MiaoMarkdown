@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <meta name="viewport" content="width=384, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no">
   <script>
     window.MathJax = {
       tex: {
@@ -118,6 +118,31 @@
       font-weight: 700;
     }
 
+    .stack-table {
+      margin: 0 0 0.72em;
+      border-top: 2px solid #000;
+      font-size: 0.9em;
+    }
+
+    .stack-row {
+      border-left: 2px solid #000;
+      border-right: 2px solid #000;
+      border-bottom: 2px solid #000;
+      padding: 2px 0;
+      page-break-inside: avoid;
+    }
+
+    .stack-field {
+      display: block;
+      padding: 4px 6px;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
+
+    .stack-key {
+      font-weight: 700;
+    }
+
     hr {
       height: 2px;
       margin: 0.8em 0;
@@ -184,6 +209,64 @@
         .replace(/^(\s*)-\s+\[[xX]\]\s+/gm, '$1- \u2611 ');
     }
 
+    function cellText(cell) {
+      return (cell && cell.textContent ? cell.textContent : '').replace(/\s+/g, ' ').trim();
+    }
+
+    function shouldStackTable(table) {
+      const rows = Array.from(table.querySelectorAll('tr'));
+      const colCount = rows.reduce((max, row) => Math.max(max, row.children.length), 0);
+      const cells = Array.from(table.querySelectorAll('th,td'));
+      const hasMath = cells.some(cell => cell.querySelector('mjx-container'));
+      const hasLongCell = cells.some(cell => cellText(cell).length > 24);
+      const tooTallForGrid = colCount >= 3 && (hasMath || hasLongCell);
+      return colCount >= 4 || tooTallForGrid;
+    }
+
+    function stackWideTables(root) {
+      Array.from(root.querySelectorAll('table')).forEach(table => {
+        if (!shouldStackTable(table)) return;
+        const headerCells = Array.from(table.querySelectorAll('tr:first-child th, tr:first-child td'));
+        const headers = headerCells.map((cell, index) => cellText(cell) || ('Column ' + (index + 1)));
+        const dataRows = Array.from(table.querySelectorAll('tr')).slice(1);
+        const wrapper = document.createElement('div');
+        wrapper.className = 'stack-table';
+
+        dataRows.forEach(row => {
+          const rowBox = document.createElement('div');
+          rowBox.className = 'stack-row';
+          Array.from(row.children).forEach((cell, index) => {
+            const field = document.createElement('div');
+            field.className = 'stack-field';
+            const key = document.createElement('span');
+            key.className = 'stack-key';
+            key.textContent = (headers[index] || ('Column ' + (index + 1))) + ': ';
+            field.appendChild(key);
+            const value = document.createElement('span');
+            value.innerHTML = cell.innerHTML;
+            field.appendChild(value);
+            rowBox.appendChild(field);
+          });
+          wrapper.appendChild(rowBox);
+        });
+
+        table.replaceWith(wrapper);
+      });
+    }
+
+    function fitMath(root) {
+      Array.from(root.querySelectorAll('mjx-container[jax="SVG"]')).forEach(node => {
+        const svg = node.querySelector('svg');
+        if (!svg) return;
+        const parentWidth = Math.max(40, node.parentElement ? node.parentElement.clientWidth : 340);
+        const box = svg.getBoundingClientRect();
+        if (box.width > parentWidth) {
+          const scale = Math.max(0.58, parentWidth / box.width);
+          node.style.fontSize = (scale * 100).toFixed(1) + '%';
+        }
+      });
+    }
+
     window.renderMarkdown = function renderMarkdown(source, textPx) {
       document.body.style.fontSize = String(textPx || 19) + 'px';
       const content = document.getElementById('content');
@@ -196,6 +279,12 @@
           return MathJax.typesetPromise([content]);
         })
         .then(function () {
+          fitMath(content);
+          stackWideTables(content);
+          return MathJax.typesetPromise([content]);
+        })
+        .then(function () {
+          fitMath(content);
           return String(pageHeight());
         })
         .catch(function (error) {

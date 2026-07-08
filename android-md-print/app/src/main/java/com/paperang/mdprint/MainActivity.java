@@ -39,6 +39,7 @@ import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.HorizontalScrollView;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -109,6 +110,7 @@ public class MainActivity extends Activity {
     private TextView feedStatus;
     private TextView status;
     private WebView previewWebView;
+    private ImageView previewImage;
     private ScrollView editorPanel;
     private ScrollView previewPanel;
     private HorizontalScrollView previewScroller;
@@ -252,15 +254,20 @@ public class MainActivity extends Activity {
 
         preview = createPaperView();
         previewWebView = createPreviewWebView();
+        root.addView(previewWebView, new LinearLayout.LayoutParams(WIDTH_PX, 1));
+        previewImage = new ImageView(this);
+        previewImage.setBackgroundColor(Color.WHITE);
+        previewImage.setAdjustViewBounds(true);
+        previewImage.setScaleType(ImageView.ScaleType.FIT_START);
         previewPanel = new ScrollView(this);
         previewPanel.setFillViewport(true);
         previewPanel.setBackgroundColor(Color.rgb(229, 234, 231));
         previewPanel.setPadding(18, 18, 18, 28);
-        previewPanel.addView(previewWebView, new ScrollView.LayoutParams(WIDTH_PX, MIN_PRINT_HEIGHT_PX));
+        previewPanel.addView(previewImage, new ScrollView.LayoutParams(-1, -2));
         previewScroller = new HorizontalScrollView(this);
-        previewScroller.setFillViewport(false);
+        previewScroller.setFillViewport(true);
         previewScroller.setBackground(cardBackground(Color.rgb(224, 230, 226), Color.rgb(184, 196, 190), 8));
-        previewScroller.addView(previewPanel, new HorizontalScrollView.LayoutParams(-2, -1));
+        previewScroller.addView(previewPanel, new HorizontalScrollView.LayoutParams(-1, -1));
         previewScroller.setVisibility(View.GONE);
 
         LinearLayout.LayoutParams previewParams = new LinearLayout.LayoutParams(-1, 0, 1);
@@ -665,6 +672,11 @@ public class MainActivity extends Activity {
         if (previewWebView == null) {
             return renderMarkdown(editor.getText().toString());
         }
+        Bitmap bitmap = captureWebBitmap(height);
+        return new RenderedPaper(encodeBitmap(bitmap), height, 0);
+    }
+
+    private Bitmap captureWebBitmap(int height) {
         setPreviewWebViewHeight(height);
         int widthSpec = View.MeasureSpec.makeMeasureSpec(WIDTH_PX, View.MeasureSpec.EXACTLY);
         int heightSpec = View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY);
@@ -675,7 +687,15 @@ public class MainActivity extends Activity {
         Canvas canvas = new Canvas(bitmap);
         canvas.drawColor(Color.WHITE);
         previewWebView.draw(canvas);
-        return new RenderedPaper(encodeBitmap(bitmap), height, 0);
+        return bitmap;
+    }
+
+    private void updatePreviewImage(int height) {
+        if (previewImage == null || previewWebView == null) {
+            return;
+        }
+        Bitmap bitmap = captureWebBitmap(Math.max(MIN_PRINT_HEIGHT_PX, Math.min(MAX_PRINT_HEIGHT_PX, height)));
+        previewImage.setImageBitmap(bitmap);
     }
 
     private RenderedPaper renderMarkdown(String markdown) {
@@ -751,6 +771,12 @@ public class MainActivity extends Activity {
         settings.setAllowContentAccess(false);
         settings.setDomStorageEnabled(false);
         settings.setLoadsImagesAutomatically(true);
+        settings.setUseWideViewPort(false);
+        settings.setLoadWithOverviewMode(false);
+        settings.setSupportZoom(false);
+        settings.setBuiltInZoomControls(false);
+        settings.setDisplayZoomControls(false);
+        webView.setInitialScale(100);
         webView.addJavascriptInterface(new RenderBridge(), "AndroidRenderer");
         webView.setWebViewClient(new WebViewClient() {
             @Override
@@ -803,10 +829,9 @@ public class MainActivity extends Activity {
         if (previewWebView == null) {
             return;
         }
-        int h = Math.max(MIN_PRINT_HEIGHT_PX, Math.min(MAX_PRINT_HEIGHT_PX, height));
         android.view.ViewGroup.LayoutParams params = previewWebView.getLayoutParams();
-        if (params != null && params.height != h) {
-            params.height = h;
+        if (params != null && (params.width != WIDTH_PX || params.height != 1)) {
+            params.height = 1;
             params.width = WIDTH_PX;
             previewWebView.setLayoutParams(params);
         }
@@ -826,6 +851,7 @@ public class MainActivity extends Activity {
                 int height = parseJsHeight(heightValue);
                 setPreviewWebViewHeight(height);
                 updateEstimate(height);
+                updatePreviewImage(height);
                 RenderCallback callback = pendingRenderCallback;
                 pendingRenderCallback = null;
                 if (callback != null) {
