@@ -1,22 +1,22 @@
-# Miao Markdown Android
+# Miao Markdown
 
 English | [中文](#中文)
 
-An Android Markdown printing app for an old Paperang P1.
+An Android Markdown printing tool for an old Paperang P1.
 
-This project mainly exists to keep my old P1 useful for Markdown notes. It is not an official app and is not intended to support every newer Paperang model.
+P1 is an early pocket thermal printer. Paperang has many newer models now; this project mainly exists to keep my old P1 useful with an Android phone. It is not an official app and not a universal Paperang client.
 
 ## Features
 
-- Markdown editing and preview.
-- Print to a paired P1.
-- Adjustable font size, density, and post-print feed.
-- Tables are laid out specifically for thermal paper.
-- Editor shortcuts for common Markdown symbols.
+- Edit Markdown on Android.
+- Preview the print layout.
+- Connect to a paired P1 and print.
+- Adjust font size, density, and post-print feed.
+- Print tables with a layout tuned for narrow thermal paper.
 
 ## Markdown
 
-The goal is to support everyday Typora-style notes:
+Currently covered:
 
 - Headings, paragraphs, bold, italic, strikethrough
 - Lists, task lists, quotes
@@ -26,58 +26,63 @@ The goal is to support everyday Typora-style notes:
 - Basic HTML
 - LaTeX formulas
 
-Mermaid, complex diagrams, images, and Typora theme CSS are not fully supported yet.
+Mermaid, complex diagrams, images, and theme CSS are not fully supported yet.
 
-## Boundary
+## Note
 
 This is a personal project for maintaining personally owned old hardware.
 
 It does not include official app code, official assets, or brand resources. It does not pretend to be an official client, does not provide a commercial service, and is not meant for bulk resale or deployment. Brand and model names are only used to describe compatible hardware.
 
+If a rights holder thinks something here is inappropriate, open an issue and I will remove or adjust it.
+
 ## License
 
-MIT License. See [LICENSE](../LICENSE).
+MIT License. See [LICENSE](LICENSE).
 
-This app is provided as-is, without warranty. Use it with hardware you own and at your own risk.
+This project is provided as-is, without warranty. Use it with hardware you own and at your own risk.
 
 ## 中文
 
-[English](#miao-markdown-android) | 中文
+[English](#miao-markdown) | 中文
 
-给旧 Paperang P1 用的 Android Markdown 打印 App。
+一个给旧 Paperang P1 用的 Android Markdown 打印小工具。
 
-这个项目主要是为了让手里的旧 P1 还能打印 Markdown 笔记。它不是官方 App，也不打算覆盖所有 Paperang 新型号。
+P1 是很早的便携热敏打印机。现在 Paperang 已经有很多后续型号，这个项目主要是为了让自己手里的旧 P1 还能在手机上打印笔记。
+请注意这个工具并非官方 App，也不是 Paperang 的通用客户端。
 
-## 功能
+## 能做什么
 
-- Markdown 编辑和预览。
-- 连接已配对的 P1 打印。
-- 字号、浓度、尾纸可调。
-- 表格会按热敏纸重新排版。
-- 编辑页提供常用 Markdown 符号快捷按钮。
+- 在 Android 手机上编辑 Markdown。
+- 预览打印效果。
+- 连接已配对的 P1 并打印。
+- 调整字号、浓度和尾纸。
+- 对表格做了适合窄热敏纸的打印排版。
 
-## Markdown
+## Markdown 支持
 
-尽量支持日常 Typora 写法：
+目前主要有这些内容：
 
 - 标题、段落、粗体、斜体、删除线
 - 列表、任务列表、引用
-- 代码、代码块
-- 链接、裸 URL
+- 行内代码、代码块
+- 链接和裸 URL
 - 表格
 - 基础 HTML
 - LaTeX 公式
 
-暂时没有完整支持 Mermaid、复杂图表、图片和 Typora 主题 CSS。
+暂时没有完整支持 Mermaid、复杂图表、图片和主题 CSS。
 
-## 边界
+## 说明
 
-这是个人自用项目，只用于维护自己手里的旧设备。
+这是个人自用项目，只是为了维护自己手里的旧设备。
 
 项目不包含官方 App 代码、官方素材或品牌资源；不冒充官方客户端；不提供商业服务；不建议用于批量销售或部署。品牌名和型号名只用于说明兼容设备。
 
+如果相关权利方认为这里有不合适的内容，可以提 issue，我会删除或调整。
+
 ## 许可证
 
-MIT License，见 [LICENSE](../LICENSE)。
+MIT License，见 [LICENSE](LICENSE)。
 
 项目按现状提供，不作担保。请只用于自己拥有的设备，风险自负。
