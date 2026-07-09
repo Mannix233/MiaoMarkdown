@@ -70,6 +70,10 @@ import org.json.JSONObject;
 
 public class MainActivity extends Activity {
     private static final int EDIT_REQUEST = 1001;
+    private static final String STATE_MARKDOWN = "state_markdown";
+    private static final String STATE_TEXT_SIZE = "state_text_size";
+    private static final String STATE_DENSITY = "state_density";
+    private static final String STATE_FEED = "state_feed";
     private static final UUID PAPERANG_SERVICE_UUID = UUID.fromString("49535343-fe7d-4ae5-8fa9-9fafd205e455");
     private static final UUID PAPERANG_WRITE_UUID = UUID.fromString("49535343-8841-43f4-a8d4-ecbe34729bb3");
     private static final UUID PAPERANG_NOTIFY_UUID = UUID.fromString("49535343-1e4d-4bd9-ba61-23c647249616");
@@ -81,7 +85,7 @@ public class MainActivity extends Activity {
     private static final int PAPER_PADDING_PX = 22;
     private static final int CONTENT_WIDTH_PX = WIDTH_PX - PAPER_PADDING_PX * 2;
     private static final int BLOCK_GAP_PX = 8;
-    private static final int THERMAL_THRESHOLD = 190;
+    private static final int THERMAL_THRESHOLD = 210;
     private static final int TABLE_BORDER_PX = 2;
     private static final int TABLE_CELL_PADDING_X = 5;
     private static final int TABLE_CELL_PADDING_Y = 5;
@@ -89,7 +93,9 @@ public class MainActivity extends Activity {
     private static final float DEFAULT_CONTENT_TEXT_PX = 19f;
     private static final float ADVANCE_MM_PER_PX = 0.1217f;
     private static final int FEED_UNITS_PER_MM = 56;
-    private static final int MIN_PRINT_HEIGHT_PX = 165;
+    private static final int MIN_PRINT_HEIGHT_PX = 24;
+    private static final int TRIM_MARGIN_TOP_PX = 4;
+    private static final int TRIM_MARGIN_BOTTOM_PX = 4;
     private static final int MAX_PRINT_HEIGHT_PX = 12000;
     private static final int PREVIEW_RENDER_DEBOUNCE_MS = 110;
     private static final int STANDARD_CRC_KEY = 0x35769521;
@@ -114,7 +120,6 @@ public class MainActivity extends Activity {
     private WebView previewWebView;
     private ImageView previewImage;
     private ScrollView editorPanel;
-    private ScrollView previewPanel;
     private ScrollView previewScroller;
     private FrameLayout previewRenderHost;
     private Button editTab;
@@ -128,7 +133,11 @@ public class MainActivity extends Activity {
     private boolean webRendererReady = false;
     private int webRenderRequestId = 0;
     private int appliedRenderRequestId = 0;
+    private int pendingCallbackRequestId = 0;
     private RenderCallback pendingRenderCallback;
+    private boolean printRenderPending = false;
+    private boolean previewRefreshRequested = false;
+    private int lastRenderedHeightPx = MIN_PRINT_HEIGHT_PX;
     private float contentTextPx = DEFAULT_CONTENT_TEXT_PX;
     private int printDensity = 75;
     private float postPrintFeedMm = 5f;
@@ -137,7 +146,26 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         buildUi();
+        if (savedInstanceState != null) {
+            editor.setText(savedInstanceState.getString(STATE_MARKDOWN, editor.getText().toString()));
+            contentTextPx = savedInstanceState.getFloat(STATE_TEXT_SIZE, contentTextPx);
+            printDensity = savedInstanceState.getInt(STATE_DENSITY, printDensity);
+            postPrintFeedMm = savedInstanceState.getFloat(STATE_FEED, postPrintFeedMm);
+            fontStatus.setText("字号 " + Math.round(contentTextPx) + "px");
+            densityStatus.setText("浓度 " + printDensity);
+            feedStatus.setText("出纸 " + formatMm(postPrintFeedMm) + "mm");
+            showPreview();
+        }
         requestNeededPermissions();
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        outState.putString(STATE_MARKDOWN, editor == null ? "" : editor.getText().toString());
+        outState.putFloat(STATE_TEXT_SIZE, contentTextPx);
+        outState.putInt(STATE_DENSITY, printDensity);
+        outState.putFloat(STATE_FEED, postPrintFeedMm);
     }
 
     @Override
@@ -211,10 +239,10 @@ public class MainActivity extends Activity {
         LinearLayout feedRow = new LinearLayout(this);
         feedRow.setOrientation(LinearLayout.HORIZONTAL);
         feedRow.setPadding(0, 8, 0, 0);
-        Button feedDown = actionButton("尾纸 -");
+        Button feedDown = actionButton("出纸 -");
         feedDown.setOnClickListener(v -> adjustFeed(-1f));
-        feedStatus = chip("尾纸 5mm", Color.rgb(255, 255, 255), Color.rgb(31, 44, 41));
-        Button feedUp = actionButton("尾纸 +");
+        feedStatus = chip("出纸 5mm", Color.rgb(255, 255, 255), Color.rgb(31, 44, 41));
+        Button feedUp = actionButton("出纸 +");
         feedUp.setOnClickListener(v -> adjustFeed(1f));
         feedRow.addView(feedDown, new LinearLayout.LayoutParams(0, -2, 1));
         LinearLayout.LayoutParams feedParams = new LinearLayout.LayoutParams(0, -2, 1);
@@ -261,7 +289,7 @@ public class MainActivity extends Activity {
         previewImage = new ImageView(this);
         previewImage.setBackgroundColor(Color.WHITE);
         previewImage.setAdjustViewBounds(true);
-        previewImage.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        previewImage.setScaleType(ImageView.ScaleType.FIT_START);
         previewImage.setMinimumHeight(MIN_PRINT_HEIGHT_PX);
         LinearLayout previewStage = new LinearLayout(this);
         previewStage.setOrientation(LinearLayout.VERTICAL);
@@ -270,15 +298,11 @@ public class MainActivity extends Activity {
         previewStage.setPadding(18, 18, 18, 28);
         LinearLayout previewPaper = panel(Color.WHITE, Color.rgb(188, 200, 194));
         previewPaper.addView(previewImage, new LinearLayout.LayoutParams(-1, -2));
-        previewPanel = new ScrollView(this);
-        previewPanel.setFillViewport(true);
-        previewPanel.setBackgroundColor(Color.TRANSPARENT);
-        previewPanel.addView(previewStage, new ScrollView.LayoutParams(-1, -2));
         previewStage.addView(previewPaper, new LinearLayout.LayoutParams(-1, -2));
         previewScroller = new ScrollView(this);
         previewScroller.setFillViewport(true);
         previewScroller.setBackground(cardBackground(Color.rgb(224, 230, 226), Color.rgb(184, 196, 190), 8));
-        previewScroller.addView(previewPanel, new ScrollView.LayoutParams(-1, -1));
+        previewScroller.addView(previewStage, new ScrollView.LayoutParams(-1, -2));
         previewScroller.setVisibility(View.GONE);
 
         LinearLayout.LayoutParams previewParams = new LinearLayout.LayoutParams(-1, 0, 1);
@@ -431,12 +455,20 @@ public class MainActivity extends Activity {
     }
 
     private void schedulePreviewUpdate() {
+        if (printRenderPending) {
+            previewRefreshRequested = true;
+            return;
+        }
         handler.removeCallbacks(previewRefreshRunnable);
         handler.postDelayed(previewRefreshRunnable, PREVIEW_RENDER_DEBOUNCE_MS);
     }
 
     private void refreshPreviewNow() {
         handler.removeCallbacks(previewRefreshRunnable);
+        if (printRenderPending) {
+            previewRefreshRequested = true;
+            return;
+        }
         renderMarkdownInWebView(null);
     }
 
@@ -468,8 +500,9 @@ public class MainActivity extends Activity {
     private void adjustFeed(float deltaMm) {
         postPrintFeedMm = Math.max(0f, Math.min(20f, postPrintFeedMm + deltaMm));
         if (feedStatus != null) {
-            feedStatus.setText("尾纸 " + formatMm(postPrintFeedMm) + "mm");
+            feedStatus.setText("出纸 " + formatMm(postPrintFeedMm) + "mm");
         }
+        updateEstimate(lastRenderedHeightPx);
     }
 
     private void requestNeededPermissions() {
@@ -671,18 +704,22 @@ public class MainActivity extends Activity {
 
     private void printMarkdown() {
         if (!ready()) return;
+        if (printRenderPending) {
+            log("上一项文稿仍在排版，请稍候。");
+            return;
+        }
         log("Rendering Markdown and formulas...");
-        showPreview();
         renderMarkdownInWebView(height -> {
             RenderedPaper paper = renderWebPaper(height);
             updateEstimate(paper.heightPx);
-            log("Print estimate: width 384px, height " + paper.heightPx + "px, about " + formatMm(estimateLengthMm(paper.heightPx)) + "mm");
+            log("打印估算：内容 " + formatMm(estimateLengthMm(paper.heightPx))
+                    + "mm，出纸 " + formatMm(postPrintFeedMm)
+                    + "mm，总计约 " + formatMm(estimateLengthMm(paper.heightPx) + postPrintFeedMm) + "mm");
             sendImage(paper.bytes);
         });
     }
 
     private void sendImage(byte[] image) {
-        sendRaw(pack(34, new byte[]{0}, 0));
         sendRaw(pack(44, new byte[]{0}, 0));
         int packetId = 0;
         for (int offset = 0; offset < image.length; offset += WIDTH_BYTES) {
@@ -691,10 +728,9 @@ public class MainActivity extends Activity {
             System.arraycopy(image, offset, chunk, 0, len);
             sendRaw(pack(0, chunk, packetId++));
         }
-        sendRaw(pack(44, new byte[]{0}, 0));
         sendRaw(pack(26, int16le(feedUnits()), 0));
         int heightPx = image.length / WIDTH_BYTES;
-        log("已入队：宽 384px，高 " + heightPx + "px，数据 " + image.length + " bytes，内容约 " + formatMm(estimateLengthMm(heightPx)) + "mm，尾纸 " + formatMm(postPrintFeedMm) + "mm");
+        log("已入队：宽 384px，高 " + heightPx + "px，数据 " + image.length + " bytes，内容约 " + formatMm(estimateLengthMm(heightPx)) + "mm，出纸 " + formatMm(postPrintFeedMm) + "mm");
     }
 
     private RenderedPaper renderWebPaper(int requestedHeight) {
@@ -702,8 +738,8 @@ public class MainActivity extends Activity {
         if (previewWebView == null) {
             return renderMarkdown(editor.getText().toString());
         }
-        Bitmap bitmap = captureWebBitmap(height);
-        return new RenderedPaper(encodeBitmap(bitmap), height, 0);
+        Bitmap bitmap = trimVerticalWhitespace(captureWebBitmap(height));
+        return new RenderedPaper(encodeBitmap(bitmap), bitmap.getHeight(), 0);
     }
 
     private Bitmap captureWebBitmap(int height) {
@@ -720,12 +756,14 @@ public class MainActivity extends Activity {
         return bitmap;
     }
 
-    private void updatePreviewImage(int height) {
+    private int updatePreviewImage(int height) {
         if (previewImage == null || previewWebView == null) {
-            return;
+            return height;
         }
-        Bitmap bitmap = captureWebBitmap(Math.max(MIN_PRINT_HEIGHT_PX, Math.min(MAX_PRINT_HEIGHT_PX, height)));
+        Bitmap bitmap = trimVerticalWhitespace(
+                captureWebBitmap(Math.max(MIN_PRINT_HEIGHT_PX, Math.min(MAX_PRINT_HEIGHT_PX, height))));
         previewImage.setImageBitmap(bitmap);
+        return bitmap.getHeight();
     }
 
     private RenderedPaper renderMarkdown(String markdown) {
@@ -813,7 +851,7 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 webRendererReady = true;
-                renderMarkdownInWebView(null);
+                refreshPreviewNow();
             }
         });
         webView.loadUrl("file:///android_asset/print.html");
@@ -834,7 +872,12 @@ public class MainActivity extends Activity {
         String markdown = prepareMarkdownForPaper(editor.getText().toString());
         int requestId = ++webRenderRequestId;
         appliedRenderRequestId = 0;
-        pendingRenderCallback = callback;
+        if (callback != null) {
+            pendingRenderCallback = callback;
+            pendingCallbackRequestId = requestId;
+            printRenderPending = true;
+        }
+        setPreviewWebViewHeight(MIN_PRINT_HEIGHT_PX);
         String js = "renderMarkdown(" + JSONObject.quote(markdown) + "," + Math.round(contentTextPx) + "," + requestId + ")"
                 + ".then(function(h){AndroidRenderer.onRendered(" + requestId + ", String(h));})"
                 + ".catch(function(){AndroidRenderer.onRendered(" + requestId + ", '165');});";
@@ -850,6 +893,28 @@ public class MainActivity extends Activity {
             return Math.max(MIN_PRINT_HEIGHT_PX, Math.min(MAX_PRINT_HEIGHT_PX, Math.round(Float.parseFloat(cleaned))));
         } catch (NumberFormatException e) {
             return MIN_PRINT_HEIGHT_PX;
+        }
+    }
+
+    private float parseRawJsHeight(String value) {
+        if (value == null) return 0f;
+        try {
+            return Float.parseFloat(value.replace("\"", "").trim());
+        } catch (NumberFormatException ignored) {
+            return 0f;
+        }
+    }
+
+    private void failRenderedRequest(int requestId, String message) {
+        log(message);
+        if (requestId == pendingCallbackRequestId) {
+            pendingRenderCallback = null;
+            pendingCallbackRequestId = 0;
+            printRenderPending = false;
+        }
+        if (previewRefreshRequested) {
+            previewRefreshRequested = false;
+            schedulePreviewUpdate();
         }
     }
 
@@ -877,12 +942,18 @@ public class MainActivity extends Activity {
             return;
         }
         appliedRenderRequestId = requestId;
-        updateEstimate(height);
-        updatePreviewImage(height);
-        RenderCallback callback = pendingRenderCallback;
-        pendingRenderCallback = null;
+        int visibleHeight = updatePreviewImage(height);
+        updateEstimate(visibleHeight);
+        RenderCallback callback = requestId == pendingCallbackRequestId ? pendingRenderCallback : null;
         if (callback != null) {
+            pendingRenderCallback = null;
+            pendingCallbackRequestId = 0;
+            printRenderPending = false;
             callback.onHeight(height);
+            if (previewRefreshRequested) {
+                previewRefreshRequested = false;
+                schedulePreviewUpdate();
+            }
         }
     }
 
@@ -900,6 +971,17 @@ public class MainActivity extends Activity {
                 if ("__STALE__".equals(heightValue)) {
                     return;
                 }
+                if (heightValue != null && heightValue.startsWith("__ERROR__:")) {
+                    failRenderedRequest(requestId, "排版已停止：" + heightValue.substring("__ERROR__:".length()));
+                    return;
+                }
+                float rawHeight = parseRawJsHeight(heightValue);
+                if (rawHeight > MAX_PRINT_HEIGHT_PX) {
+                    failRenderedRequest(requestId,
+                            "文稿高 " + Math.round(rawHeight) + "px，超过单次打印上限 "
+                                    + MAX_PRINT_HEIGHT_PX + "px。请拆成两次打印，程序没有截掉尾部。");
+                    return;
+                }
                 int height = parseJsHeight(heightValue);
                 setPreviewWebViewHeight(height);
                 previewWebView.postVisualStateCallback(requestId, new WebView.VisualStateCallback() {
@@ -908,7 +990,6 @@ public class MainActivity extends Activity {
                         handler.post(() -> completeRenderedPreview(requestId, height));
                     }
                 });
-                handler.postDelayed(() -> completeRenderedPreview(requestId, height), 180);
             });
         }
     }
@@ -980,8 +1061,15 @@ public class MainActivity extends Activity {
         String normalized = markdown.replace("\r\n", "\n");
         String[] lines = normalized.split("\n", -1);
         StringBuilder out = new StringBuilder(normalized.length() + 32);
+        char fenceMarker = 0;
         for (int i = 0; i < lines.length; i++) {
-            String line = prepareLineMathForPreview(lines[i]);
+            String rawLine = lines[i];
+            String trimmed = rawLine.trim();
+            if (trimmed.matches("^(`{3,}|~{3,}).*$")) {
+                char marker = trimmed.charAt(0);
+                fenceMarker = fenceMarker == 0 ? marker : (fenceMarker == marker ? 0 : fenceMarker);
+            }
+            String line = fenceMarker == 0 ? prepareLineMathForPreview(rawLine) : rawLine;
             out.append(line);
             if (i < lines.length - 1) {
                 out.append('\n');
@@ -1014,6 +1102,9 @@ public class MainActivity extends Activity {
             return "";
         }
         String trimmed = line.trim();
+        if (trimmed.startsWith("<") || trimmed.indexOf('`') >= 0 || trimmed.indexOf('|') >= 0) {
+            return line;
+        }
         if (looksLikeFormula(trimmed) && isMostlyFormulaText(trimmed) && !hasMathDelimiters(trimmed)) {
             int leading = line.indexOf(trimmed);
             String prefix = leading > 0 ? line.substring(0, leading) : "";
@@ -1067,7 +1158,8 @@ public class MainActivity extends Activity {
                 || lower.matches(".*\\b[a-z]\\b.*") || t.indexOf('^') >= 0 || t.indexOf('_') >= 0)) {
             return true;
         }
-        if (t.indexOf('^') >= 0 || t.indexOf('_') >= 0) {
+        if ((t.indexOf('^') >= 0 || t.indexOf('_') >= 0)
+                && (t.indexOf('\\') >= 0 || t.matches(".*\\d.*") || t.matches(".*[=+*/()].*"))) {
             return true;
         }
         return lower.matches(".*\\b(alpha|beta|gamma|delta|theta|lambda|mu|xi|pi|rho|sigma|tau|phi|omega)\\b.*")
@@ -1851,13 +1943,17 @@ public class MainActivity extends Activity {
 
     private void updateEstimate(int heightPx) {
         if (estimateStatus != null) {
+            lastRenderedHeightPx = heightPx;
             int dotRows = Math.max(1, heightPx);
-            estimateStatus.setText("384px · 高 " + heightPx + "px / " + dotRows + "行 · 约 " + formatMm(estimateLengthMm(heightPx)) + "mm · 0.1217mm/px");
+            float contentMm = estimateLengthMm(heightPx);
+            estimateStatus.setText("384px · " + dotRows + "行 · 内容 " + formatMm(contentMm)
+                    + "mm + 出纸 " + formatMm(postPrintFeedMm)
+                    + "mm = 约 " + formatMm(contentMm + postPrintFeedMm) + "mm");
         }
     }
 
     private float estimateLengthMm(int heightPx) {
-        return Math.max(20f, heightPx * ADVANCE_MM_PER_PX);
+        return Math.max(0f, heightPx * ADVANCE_MM_PER_PX);
     }
 
     private int feedUnits() {
@@ -1987,13 +2083,60 @@ public class MainActivity extends Activity {
                 for (int bit = 0; bit < 8; bit++) {
                     int x = xb * 8 + bit;
                     int pixel = bitmap.getPixel(x, y);
-                    int gray = (Color.red(pixel) + Color.green(pixel) + Color.blue(pixel)) / 3;
+                    int gray = Math.round(
+                            Color.red(pixel) * 0.299f
+                                    + Color.green(pixel) * 0.587f
+                                    + Color.blue(pixel) * 0.114f);
                     value = (value << 1) | (gray < THERMAL_THRESHOLD ? 1 : 0);
                 }
                 out[index++] = (byte) value;
             }
         }
         return out;
+    }
+
+    private Bitmap trimVerticalWhitespace(Bitmap source) {
+        int firstInk = -1;
+        int lastInk = -1;
+        for (int y = 0; y < source.getHeight(); y++) {
+            if (rowHasInk(source, y)) {
+                if (firstInk < 0) {
+                    firstInk = y;
+                }
+                lastInk = y;
+            }
+        }
+
+        if (firstInk < 0) {
+            Bitmap blank = Bitmap.createBitmap(WIDTH_PX, MIN_PRINT_HEIGHT_PX, Bitmap.Config.ARGB_8888);
+            new Canvas(blank).drawColor(Color.WHITE);
+            return blank;
+        }
+
+        int top = Math.max(0, firstInk - TRIM_MARGIN_TOP_PX);
+        int bottom = Math.min(source.getHeight() - 1, lastInk + TRIM_MARGIN_BOTTOM_PX);
+        int height = Math.max(MIN_PRINT_HEIGHT_PX, bottom - top + 1);
+        if (top + height > source.getHeight()) {
+            top = Math.max(0, source.getHeight() - height);
+        }
+        if (top == 0 && height == source.getHeight()) {
+            return source;
+        }
+        return Bitmap.createBitmap(source, 0, top, WIDTH_PX, height);
+    }
+
+    private boolean rowHasInk(Bitmap bitmap, int y) {
+        for (int x = 0; x < bitmap.getWidth(); x++) {
+            int pixel = bitmap.getPixel(x, y);
+            int gray = Math.round(
+                    Color.red(pixel) * 0.299f
+                            + Color.green(pixel) * 0.587f
+                            + Color.blue(pixel) * 0.114f);
+            if (gray < THERMAL_THRESHOLD) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private byte[] pack(int command, byte[] data, int packetId) {

@@ -19,3 +19,15 @@ _Avoid_: print layout
 **Wide content fallback**:
 The rule set used when a formula, link, code span, or table cannot fit on the print surface. Prefer wrapping, stacking, or scaling before clipping.
 _Avoid_: crop, horizontal scroll
+
+**Content whitespace**:
+Blank rows produced by document layout around the first and last visible marks. These rows may be trimmed without changing the document.
+_Avoid_: feed, paper margin
+
+**Eject feed**:
+The short mechanical advance after printing that leaves the finished paper reachable outside the printer. It is independent of rendered paper height.
+_Avoid_: bottom padding, tail whitespace
+
+**Formatting command**:
+An editor action that inserts or removes portable Markdown or supported HTML around the current selection. It changes the document source and therefore both preview and print.
+_Avoid_: preview styling

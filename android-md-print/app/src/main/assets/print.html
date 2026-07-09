@@ -42,9 +42,12 @@
     #content {
       box-sizing: border-box;
       width: 384px;
-      padding: 22px;
-      overflow: hidden;
+      padding: 10px 18px 8px;
+      overflow: visible;
     }
+
+    #content > :first-child { margin-top: 0; }
+    #content > :last-child { margin-bottom: 0; }
 
     h1, h2, h3, h4, h5, h6 {
       margin: 0.55em 0 0.35em;
@@ -165,9 +168,42 @@
       text-decoration: underline;
     }
 
+    img {
+      display: block;
+      max-width: 100%;
+      height: auto;
+      filter: grayscale(1) contrast(1.2);
+    }
+
+    .align-left { text-align: left; }
+    .align-center { text-align: center; }
+    .align-right { text-align: right; }
+    .align-justify {
+      text-align: justify;
+      text-align-last: auto;
+    }
+
+    .font-sm { font-size: 0.84em; }
+    .font-md { font-size: 1em; }
+    .font-lg { font-size: 1.2em; }
+    .font-xl { font-size: 1.42em; }
+
+    mark {
+      padding: 0 0.12em;
+      color: #000;
+      background: #ddd;
+    }
+
+    .footnotes {
+      margin-top: 0.8em;
+      padding-top: 0.45em;
+      border-top: 1px solid #000;
+      font-size: 0.82em;
+    }
+
     mjx-container {
       max-width: 100%;
-      overflow: hidden;
+      overflow: visible;
     }
 
     mjx-container[jax="SVG"] {
@@ -190,7 +226,7 @@
     mjx-container[jax="SVG"][display="true"] {
       display: block;
       margin: 0.45em 0;
-      overflow: hidden;
+      overflow: visible;
       text-align: left !important;
     }
 
@@ -208,22 +244,165 @@
       typographer: false,
       breaks: false
     });
+    const containerClasses = {
+      left: 'align-left',
+      center: 'align-center',
+      right: 'align-right',
+      justify: 'align-justify',
+      'font-sm': 'font-sm',
+      'font-md': 'font-md',
+      'font-lg': 'font-lg',
+      'font-xl': 'font-xl'
+    };
+    Object.keys(containerClasses).forEach(name => installContainerRule(md, name, containerClasses[name]));
     let activeRenderRequestId = 0;
+    let renderQueue = Promise.resolve();
+
+    function installContainerRule(markdown, name, className) {
+      function container(state, startLine, endLine, silent) {
+        let start = state.bMarks[startLine] + state.tShift[startLine];
+        let max = state.eMarks[startLine];
+        const opening = state.src.slice(start, max).trim();
+        if (opening !== '::: ' + name && opening !== ':::' + name) return false;
+        if (silent) return true;
+
+        let nextLine = startLine + 1;
+        while (nextLine < endLine) {
+          start = state.bMarks[nextLine] + state.tShift[nextLine];
+          max = state.eMarks[nextLine];
+          if (state.src.slice(start, max).trim() === ':::') break;
+          nextLine++;
+        }
+
+        const oldParent = state.parentType;
+        const oldLineMax = state.lineMax;
+        state.parentType = 'container';
+        state.lineMax = nextLine;
+        const open = state.push('miao_' + name + '_open', 'div', 1);
+        open.block = true;
+        open.map = [startLine, nextLine];
+        open.attrSet('class', className);
+        state.md.block.tokenize(state, startLine + 1, nextLine);
+        const close = state.push('miao_' + name + '_close', 'div', -1);
+        close.block = true;
+        state.parentType = oldParent;
+        state.lineMax = oldLineMax;
+        state.line = nextLine < endLine ? nextLine + 1 : nextLine;
+        return true;
+      }
+      markdown.block.ruler.before('fence', 'miao_' + name, container, {
+        alt: ['paragraph', 'reference', 'blockquote', 'list']
+      });
+    }
 
     function pageHeight() {
-      return Math.ceil(Math.max(
-        document.body.scrollHeight,
-        document.documentElement.scrollHeight,
-        document.getElementById('content').scrollHeight
-      ));
+      const content = document.getElementById('content');
+      return Math.max(1, Math.ceil(content.getBoundingClientRect().height));
     }
 
     function normalizeMarkdown(source) {
-      return String(source || '')
+      const safeSource = normalizeAlternateMathDelimiters(String(source || '')
         .replace(/<script[\s\S]*?<\/script>/gi, '')
-        .replace(/<script\b[^>]*>/gi, '')
+        .replace(/<script\b[^>]*>/gi, ''));
+      return normalizeMathFences(safeSource)
         .replace(/^(\s*)-\s+\[\s\]\s+/gm, '$1- \u2610 ')
         .replace(/^(\s*)-\s+\[[xX]\]\s+/gm, '$1- \u2611 ');
+    }
+
+    function normalizeMathFences(source) {
+      return source.replace(
+        /^(?:`{3,}|~{3,})math\s*\n([\s\S]*?)\n(?:`{3,}|~{3,})\s*$/gmi,
+        function (_match, formula) {
+          return '$$\n' + formula.trim() + '\n$$';
+        }
+      );
+    }
+
+    function normalizeAlternateMathDelimiters(source) {
+      let fence = '';
+      return source.split('\n').map(line => {
+        const fenceMatch = line.match(/^\s*(`{3,}|~{3,})/);
+        if (fenceMatch) {
+          const marker = fenceMatch[1][0];
+          fence = fence ? (fence === marker ? '' : fence) : marker;
+          return line;
+        }
+        if (fence) return line;
+        return mapOutsideInlineCode(line, text => text
+          .replace(/\\\(/g, '$')
+          .replace(/\\\)/g, '$')
+          .replace(/\\\[/g, '$$')
+          .replace(/\\\]/g, '$$'));
+      }).join('\n');
+    }
+
+    function mapOutsideInlineCode(line, transform) {
+      let output = '';
+      let cursor = 0;
+      while (cursor < line.length) {
+        const open = line.indexOf('`', cursor);
+        if (open < 0) {
+          output += transform(line.slice(cursor));
+          break;
+        }
+        output += transform(line.slice(cursor, open));
+        let markerEnd = open;
+        while (markerEnd < line.length && line[markerEnd] === '`') markerEnd++;
+        const marker = line.slice(open, markerEnd);
+        const close = line.indexOf(marker, markerEnd);
+        if (close < 0) {
+          output += line.slice(open);
+          break;
+        }
+        output += line.slice(open, close + marker.length);
+        cursor = close + marker.length;
+      }
+      return output;
+    }
+
+    function renderDocument(source) {
+      const definitions = new Map();
+      let fence = '';
+      const bodyLines = source.split('\n').filter(line => {
+        const fenceMatch = line.match(/^\s*(`{3,}|~{3,})/);
+        if (fenceMatch) {
+          const marker = fenceMatch[1][0];
+          fence = fence ? (fence === marker ? '' : fence) : marker;
+          return true;
+        }
+        if (fence) return true;
+        const match = line.match(/^\[\^([^\]]+)\]:\s*(.+)$/);
+        if (!match) return true;
+        definitions.set(match[1], match[2]);
+        return false;
+      });
+      const used = [];
+      fence = '';
+      const body = bodyLines.map(line => {
+        const fenceMatch = line.match(/^\s*(`{3,}|~{3,})/);
+        if (fenceMatch) {
+          const marker = fenceMatch[1][0];
+          fence = fence ? (fence === marker ? '' : fence) : marker;
+          return line;
+        }
+        if (fence) return line;
+        return mapOutsideInlineCode(line, text => text.replace(/\[\^([^\]]+)\]/g, function (match, id) {
+          if (!definitions.has(id)) return match;
+          let index = used.indexOf(id);
+          if (index < 0) {
+            used.push(id);
+            index = used.length - 1;
+          }
+          return '<sup class="footnote-ref">[' + (index + 1) + ']</sup>';
+        }));
+      }).join('\n');
+      let html = md.render(body);
+      if (!used.length) return html;
+      html += '<section class="footnotes"><ol>';
+      used.forEach(id => {
+        html += '<li>' + md.renderInline(definitions.get(id)) + '</li>';
+      });
+      return html + '</ol></section>';
     }
 
     function cellText(cell) {
@@ -277,11 +456,11 @@
 
     function shrinkTableToFit(table) {
       const fontSteps = tableHasComplexContent(table)
-        ? [0.8, 0.76, 0.72, 0.68, 0.64, 0.6, 0.56]
+        ? [0.8, 0.76, 0.72, 0.68, 0.64]
         : [0.82, 0.78, 0.74, 0.7, 0.66];
       for (const size of fontSteps) {
         table.style.fontSize = size.toFixed(2) + 'em';
-        fitMath(table);
+        fitMath(table, 0.72);
         if (!hasHorizontalOverflow(table)) {
           return true;
         }
@@ -291,15 +470,9 @@
 
     function shouldStackTable(table) {
       const colCount = tableColumnCount(table);
-      const hasComplexContent = tableHasComplexContent(table);
-      if (colCount >= 4) return true;
       if (colCount <= 1) return false;
-      if (colCount === 3 && hasComplexContent) {
-        shrinkTableToFit(table);
-        return false;
-      }
       if (shrinkTableToFit(table)) return false;
-      return colCount >= 3 && !hasComplexContent;
+      return colCount >= 2;
     }
 
     function stackWideTables(root) {
@@ -338,61 +511,108 @@
           wrapper.appendChild(rowBox);
         });
 
+        MathJax.typesetClear([table]);
         table.replaceWith(wrapper);
       });
     }
 
-    function fitMath(root) {
+    function fitMath(root, minimumScale) {
+      const minimum = typeof minimumScale === 'number' ? minimumScale : 0.35;
       Array.from(root.querySelectorAll('mjx-container[jax="SVG"]')).forEach(node => {
         const svg = node.querySelector('svg');
         if (!svg) return;
+        node.style.fontSize = '';
+        svg.style.width = '';
+        svg.style.height = '';
         const parentWidth = Math.max(40, node.parentElement ? node.parentElement.clientWidth : 340);
         const box = svg.getBoundingClientRect();
         if (box.width > parentWidth) {
-          const scale = Math.max(0.58, parentWidth / box.width);
+          const scale = Math.max(minimum, parentWidth / box.width);
           node.style.fontSize = (scale * 100).toFixed(1) + '%';
+          if (svg.getBoundingClientRect().width > parentWidth) {
+            svg.style.width = '100%';
+            svg.style.height = 'auto';
+          }
         }
       });
     }
 
-    window.renderMarkdown = function renderMarkdown(source, textPx, requestId) {
-      activeRenderRequestId = requestId || 0;
+    function waitForImages(root) {
+      const pending = Array.from(root.querySelectorAll('img'))
+        .filter(image => !image.complete)
+        .map(image => new Promise(resolve => {
+          const done = () => resolve();
+          image.addEventListener('load', done, {once: true});
+          image.addEventListener('error', done, {once: true});
+          setTimeout(done, 1500);
+        }));
+      return Promise.all(pending);
+    }
+
+    function sanitizeRenderedHtml(root) {
+      root.querySelectorAll('script, iframe, object, embed, style, link, meta').forEach(node => node.remove());
+      root.querySelectorAll('*').forEach(node => {
+        Array.from(node.attributes).forEach(attribute => {
+          const name = attribute.name.toLowerCase();
+          const value = attribute.value.trim().toLowerCase();
+          if (name.startsWith('on')
+              || ((name === 'href' || name === 'src') && value.startsWith('javascript:'))) {
+            node.removeAttribute(attribute.name);
+          }
+        });
+      });
+    }
+
+    function performRender(source, textPx, requestId) {
+      if (!isActiveRequest(requestId)) return Promise.resolve('__STALE__');
       document.body.style.fontSize = String(textPx || 19) + 'px';
       const content = document.getElementById('content');
       const normalized = normalizeMarkdown(source);
-      content.innerHTML = md.render(normalized);
+      MathJax.typesetClear([content]);
+      content.innerHTML = renderDocument(normalized);
+      sanitizeRenderedHtml(content);
 
       return MathJax.startup.promise
         .then(function () {
           if (!isActiveRequest(requestId)) return '__STALE__';
-          MathJax.typesetClear([content]);
           return MathJax.typesetPromise([content]);
         })
         .then(function () {
           if (!isActiveRequest(requestId)) return '__STALE__';
           markMathCells(content);
-          fitMath(content);
           stackWideTables(content);
-          return MathJax.typesetPromise([content]);
+          markMathCells(content);
+          fitMath(content);
+          return waitForImages(content);
         })
         .then(function () {
           if (!isActiveRequest(requestId)) return '__STALE__';
-          markMathCells(content);
-          fitMath(content);
           return settleLayout();
         })
         .then(function () {
           if (!isActiveRequest(requestId)) return '__STALE__';
+          const mathErrors = content.querySelectorAll('[data-mml-node="merror"], mjx-merror');
+          if (mathErrors.length) {
+            return '__ERROR__:有 ' + mathErrors.length + ' 处公式无法解析';
+          }
           return String(pageHeight());
         })
         .catch(function (error) {
           if (!isActiveRequest(requestId) || (error && error.message === '__STALE__')) {
             return '__STALE__';
           }
-          content.innerHTML = '<pre></pre>';
-          content.querySelector('pre').textContent = String(source || '') + '\n\nMath render error: ' + error.message;
-          return String(pageHeight());
+          return '__ERROR__:' + (error && error.message ? error.message : '公式渲染失败');
         });
+    }
+
+    window.renderMarkdown = function renderMarkdown(source, textPx, requestId) {
+      activeRenderRequestId = requestId || 0;
+      renderQueue = renderQueue
+        .catch(function () { return ''; })
+        .then(function () {
+          return performRender(source, textPx, requestId);
+        });
+      return renderQueue;
     };
   </script>
 </body>
