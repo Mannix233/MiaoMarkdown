@@ -50,9 +50,9 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.Locale;
-import java.util.Queue;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -98,14 +98,17 @@ public class MainActivity extends Activity {
     private static final int TRIM_MARGIN_BOTTOM_PX = 4;
     private static final int MAX_PRINT_HEIGHT_PX = 12000;
     private static final int PREVIEW_RENDER_DEBOUNCE_MS = 110;
+    private static final int MAX_BLE_WRITE_RETRIES = 3;
     private static final int STANDARD_CRC_KEY = 0x35769521;
     private static final int SESSION_CRC_KEY = 0x06968634 ^ 0x002e696d;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable previewRefreshRunnable = () -> renderMarkdownInWebView(null);
-    private final Queue<byte[]> bleWriteQueue = new ArrayDeque<>();
+    private final Deque<byte[]> bleWriteQueue = new ArrayDeque<>();
     private final ExecutorService classicWriter = Executors.newSingleThreadExecutor();
     private boolean bleWriting = false;
+    private byte[] bleInFlightPacket;
+    private int bleWriteRetryCount = 0;
     private int crcKey = STANDARD_CRC_KEY;
 
     private EditText editor;
@@ -627,8 +630,7 @@ public class MainActivity extends Activity {
 
         @Override
         public void onCharacteristicWrite(BluetoothGatt g, BluetoothGattCharacteristic c, int statusCode) {
-            bleWriting = false;
-            handler.postDelayed(MainActivity.this::drainBleQueue, 80);
+            handler.post(() -> handleBleWriteResult(statusCode));
         }
 
         @Override
@@ -2212,16 +2214,45 @@ public class MainActivity extends Activity {
         try {
             bleWriteCharacteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
             bleWriteCharacteristic.setValue(packet);
+            bleInFlightPacket = packet;
             bleWriting = true;
             boolean ok = gatt.writeCharacteristic(bleWriteCharacteristic);
             if (!ok) {
                 bleWriting = false;
-                log("BLE writeCharacteristic returned false");
+                retryBlePacket("BLE 写入未启动");
             }
         } catch (SecurityException e) {
             bleWriting = false;
+            bleInFlightPacket = null;
+            bleWriteRetryCount = 0;
             log("BLE write permission denied.");
         }
+    }
+
+    private void handleBleWriteResult(int statusCode) {
+        bleWriting = false;
+        if (statusCode == BluetoothGatt.GATT_SUCCESS) {
+            bleInFlightPacket = null;
+            bleWriteRetryCount = 0;
+            handler.postDelayed(this::drainBleQueue, 80);
+            return;
+        }
+        retryBlePacket("BLE 写入失败，状态 " + statusCode);
+    }
+
+    private void retryBlePacket(String reason) {
+        byte[] failedPacket = bleInFlightPacket;
+        bleInFlightPacket = null;
+        if (failedPacket != null && bleWriteRetryCount < MAX_BLE_WRITE_RETRIES) {
+            bleWriteRetryCount++;
+            bleWriteQueue.addFirst(failedPacket);
+            log(reason + "，正在重试 " + bleWriteRetryCount + "/" + MAX_BLE_WRITE_RETRIES);
+            handler.postDelayed(this::drainBleQueue, 160);
+            return;
+        }
+        bleWriteRetryCount = 0;
+        bleWriteQueue.clear();
+        log(reason + "，已停止本次打印，避免继续输出残缺内容，请重新打印。");
     }
 
     private boolean ready() {
@@ -2289,6 +2320,8 @@ public class MainActivity extends Activity {
             bleWriteCharacteristic = null;
             bleWriteQueue.clear();
             bleWriting = false;
+            bleInFlightPacket = null;
+            bleWriteRetryCount = 0;
         }
     }
 
