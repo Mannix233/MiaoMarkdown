@@ -24,7 +24,9 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
+import java.util.List;
 
 public class EditorActivity extends Activity {
     public static final String EXTRA_MARKDOWN = "markdown";
@@ -35,6 +37,8 @@ public class EditorActivity extends Activity {
     private static final int COLOR_PAPER = Color.rgb(255, 255, 252);
     private static final int COLOR_CANVAS = Color.rgb(238, 241, 239);
     private static final int COLOR_LINE = Color.rgb(190, 199, 195);
+    private static final String[] FONT_BLOCKS = {"font-sm", "font-md", "font-lg", "font-xl"};
+    private static final String[] ALIGN_BLOCKS = {"left", "center", "right", "justify"};
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Deque<EditorState> undoStack = new ArrayDeque<>();
@@ -321,6 +325,16 @@ public class EditorActivity extends Activity {
         Editable text = editor.getText();
         int start = selectionStart();
         int end = selectionEnd();
+        String selected = text.subSequence(start, end).toString();
+        if (selected.startsWith(before)
+                && selected.endsWith(after)
+                && selected.length() >= before.length() + after.length()) {
+            String inner = selected.substring(before.length(), selected.length() - after.length());
+            text.replace(start, end, inner);
+            editor.setSelection(start, start + inner.length());
+            return;
+        }
+
         if (start >= before.length()
                 && end + after.length() <= text.length()
                 && text.subSequence(start - before.length(), start).toString().equals(before)
@@ -331,7 +345,35 @@ public class EditorActivity extends Activity {
             return;
         }
 
-        String selected = text.subSequence(start, end).toString();
+        String oppositeBefore = before.equals("<sub>") ? "<sup>" : (before.equals("<sup>") ? "<sub>" : "");
+        String oppositeAfter = after.equals("</sub>") ? "</sup>" : (after.equals("</sup>") ? "</sub>" : "");
+        if (!oppositeBefore.isEmpty()
+                && start >= oppositeBefore.length()
+                && end + oppositeAfter.length() <= text.length()
+                && text.subSequence(start - oppositeBefore.length(), start).toString().equals(oppositeBefore)
+                && text.subSequence(end, end + oppositeAfter.length()).toString().equals(oppositeAfter)) {
+            int outerStart = start - oppositeBefore.length();
+            int outerEnd = end + oppositeAfter.length();
+            String inner = text.subSequence(start, end).toString();
+            text.replace(outerStart, outerEnd, before + inner + after);
+            int innerStart = outerStart + before.length();
+            editor.setSelection(innerStart, innerStart + inner.length());
+            return;
+        }
+
+        String conflict = before.equals("`") ? "$" : (before.equals("$") ? "`" : "");
+        if (!conflict.isEmpty()
+                && start >= conflict.length()
+                && end + conflict.length() <= text.length()
+                && text.subSequence(start - conflict.length(), start).toString().equals(conflict)
+                && text.subSequence(end, end + conflict.length()).toString().equals(conflict)) {
+            android.widget.Toast.makeText(
+                    this,
+                    "行内代码和公式不能直接嵌套，请先取消原格式",
+                    android.widget.Toast.LENGTH_SHORT).show();
+            return;
+        }
+
         String inner = selected.isEmpty() ? placeholder : selected;
         text.replace(start, end, before + inner + after);
         int innerStart = start + before.length();
@@ -340,14 +382,92 @@ public class EditorActivity extends Activity {
 
     private void wrapBlock(String blockName, String placeholder) {
         Editable text = editor.getText();
-        int start = lineStart(selectionStart());
+        int selectionStart = selectionStart();
+        int selectionEnd = selectionEnd();
+        String[] group = blockName.startsWith("font-") ? FONT_BLOCKS : ALIGN_BLOCKS;
+        BlockContainer existing = findSelectionContainer(text.toString(), group, selectionStart, selectionEnd);
+        if (existing != null) {
+            if (existing.name.equals(blockName)) {
+                android.widget.Toast.makeText(this, "已经是这个格式，没有重复添加", android.widget.Toast.LENGTH_SHORT).show();
+                return;
+            }
+            String opening = "::: " + blockName;
+            int offset = opening.length() - (existing.openEnd - existing.openStart);
+            boolean selectedWholeContainer = selectionStart == existing.openStart
+                    && selectionEnd == existing.closeEnd;
+            text.replace(existing.openStart, existing.openEnd, opening);
+            if (selectedWholeContainer) {
+                editor.setSelection(existing.contentStart + offset, existing.contentEnd + offset);
+            } else {
+                editor.setSelection(selectionStart + offset, selectionEnd + offset);
+            }
+            return;
+        }
+
+        int start = lineStart(selectionStart);
         int end = selectedBlockEnd();
-        String selected = text.subSequence(start, end).toString();
+        String original = text.subSequence(start, end).toString();
+        String selected = original;
         if (selected.trim().isEmpty()) selected = placeholder;
         String replacement = "::: " + blockName + "\n" + selected + "\n:::";
         text.replace(start, end, replacement);
         int contentStart = start + blockName.length() + 5;
-        editor.setSelection(contentStart, contentStart + selected.length());
+        if (original.isEmpty()) {
+            editor.setSelection(contentStart, contentStart + selected.length());
+        } else {
+            editor.setSelection(contentStart + selectionStart - start, contentStart + selectionEnd - start);
+        }
+    }
+
+    private BlockContainer findSelectionContainer(String source, String[] group, int start, int end) {
+        List<BlockContainer> containers = parseBlockContainers(source);
+        BlockContainer best = null;
+        for (BlockContainer container : containers) {
+            if (!contains(group, container.name)) continue;
+            boolean containsSelection = start >= container.contentStart && end <= container.contentEnd;
+            boolean selectsWholeContainer = start == container.openStart && end == container.closeEnd;
+            if (!containsSelection && !selectsWholeContainer) continue;
+            if (best == null
+                    || container.closeEnd - container.openStart < best.closeEnd - best.openStart) {
+                best = container;
+            }
+        }
+        return best;
+    }
+
+    private List<BlockContainer> parseBlockContainers(String source) {
+        List<BlockContainer> containers = new ArrayList<>();
+        Deque<BlockContainer> stack = new ArrayDeque<>();
+        int lineStart = 0;
+        while (lineStart <= source.length()) {
+            int nextBreak = source.indexOf('\n', lineStart);
+            int lineEnd = nextBreak < 0 ? source.length() : nextBreak;
+            String line = source.substring(lineStart, lineEnd).trim();
+            if (line.startsWith("::: ") && line.length() > 4) {
+                stack.push(new BlockContainer(
+                        line.substring(4).trim(),
+                        lineStart,
+                        lineEnd,
+                        nextBreak < 0 ? lineEnd : lineEnd + 1));
+            } else if (line.equals(":::") && !stack.isEmpty()) {
+                BlockContainer container = stack.pop();
+                container.contentEnd = lineStart > 0 && source.charAt(lineStart - 1) == '\n'
+                        ? lineStart - 1
+                        : lineStart;
+                container.closeEnd = lineEnd;
+                containers.add(container);
+            }
+            if (nextBreak < 0) break;
+            lineStart = nextBreak + 1;
+        }
+        return containers;
+    }
+
+    private boolean contains(String[] values, String target) {
+        for (String value : values) {
+            if (value.equals(target)) return true;
+        }
+        return false;
     }
 
     private void applyHeading(int level) {
@@ -541,6 +661,22 @@ public class EditorActivity extends Activity {
         StringBuilder out = new StringBuilder(value.length() * count);
         for (int i = 0; i < count; i++) out.append(value);
         return out.toString();
+    }
+
+    private static class BlockContainer {
+        final String name;
+        final int openStart;
+        final int openEnd;
+        final int contentStart;
+        int contentEnd;
+        int closeEnd;
+
+        BlockContainer(String name, int openStart, int openEnd, int contentStart) {
+            this.name = name;
+            this.openStart = openStart;
+            this.openEnd = openEnd;
+            this.contentStart = contentStart;
+        }
     }
 
     private static class EditorState {

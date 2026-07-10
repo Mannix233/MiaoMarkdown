@@ -140,7 +140,7 @@ public class MainActivity extends Activity {
     private int lastRenderedHeightPx = MIN_PRINT_HEIGHT_PX;
     private float contentTextPx = DEFAULT_CONTENT_TEXT_PX;
     private int printDensity = 75;
-    private float postPrintFeedMm = 5f;
+    private float postPrintFeedMm = 2f;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -241,7 +241,7 @@ public class MainActivity extends Activity {
         feedRow.setPadding(0, 8, 0, 0);
         Button feedDown = actionButton("出纸 -");
         feedDown.setOnClickListener(v -> adjustFeed(-1f));
-        feedStatus = chip("出纸 5mm", Color.rgb(255, 255, 255), Color.rgb(31, 44, 41));
+        feedStatus = chip("出纸 2mm", Color.rgb(255, 255, 255), Color.rgb(31, 44, 41));
         Button feedUp = actionButton("出纸 +");
         feedUp.setOnClickListener(v -> adjustFeed(1f));
         feedRow.addView(feedDown, new LinearLayout.LayoutParams(0, -2, 1));
