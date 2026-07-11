@@ -325,10 +325,7 @@ public class MainActivity extends Activity {
         connectRow.setPadding(0, 0, 0, 8);
         Button classicConnect = primaryButton("连接打印机");
         classicConnect.setOnClickListener(v -> connectFirstPairedClassicDevice());
-        Button bleConnect = actionButton("BLE 备用");
-        bleConnect.setOnClickListener(v -> startBleScan());
-        connectRow.addView(classicConnect, new LinearLayout.LayoutParams(0, -2, 2));
-        addRowButton(connectRow, bleConnect);
+        connectRow.addView(classicConnect, new LinearLayout.LayoutParams(-1, -2));
         root.addView(connectRow);
 
         LinearLayout printRow = new LinearLayout(this);
