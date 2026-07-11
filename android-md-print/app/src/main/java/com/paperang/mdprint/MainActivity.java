@@ -508,11 +508,8 @@ public class MainActivity extends Activity {
     private void requestNeededPermissions() {
         if (Build.VERSION.SDK_INT >= 31) {
             requestPermissions(new String[]{
-                    Manifest.permission.BLUETOOTH_SCAN,
                     Manifest.permission.BLUETOOTH_CONNECT
             }, 10);
-        } else {
-            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, 10);
         }
     }
 
