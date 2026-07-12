@@ -230,6 +230,22 @@
       text-align: left !important;
     }
 
+    /* Thermal clarity (mirrors desktop): fatten MathJax formula glyphs + fraction
+       bars, and bold small table-cell CJK, so thin strokes survive 384px thermal
+       printing. Stroke is non-scaling so it stays a constant hairline regardless of
+       the SVG scale. */
+    mjx-container[jax="SVG"] svg path,
+    mjx-container[jax="SVG"] svg rect,
+    mjx-container[jax="SVG"] svg line {
+      stroke: currentColor;
+      stroke-width: 0.5px;
+      vector-effect: non-scaling-stroke;
+    }
+
+    td {
+      font-weight: 600;
+    }
+
     svg {
       max-width: 100%;
     }
@@ -300,13 +316,55 @@
       return Math.max(1, Math.ceil(content.getBoundingClientRect().height));
     }
 
+    function protectPipesInMathSpans(segment) {
+      const delims = [['$$', '$$'], ['$', '$']];
+      let out = '';
+      let i = 0;
+      while (i < segment.length) {
+        let matched = false;
+        for (let d = 0; d < delims.length; d++) {
+          const open = delims[d][0];
+          const close = delims[d][1];
+          if (segment.substr(i, open.length) === open) {
+            const start = i + open.length;
+            const end = segment.indexOf(close, start);
+            if (end !== -1) {
+              const math = segment.slice(start, end).replace(/(^|[^\\])\|/g, '$1{\\vert}');
+              out += open + math + close;
+              i = end + close.length;
+              matched = true;
+              break;
+            }
+          }
+        }
+        if (!matched) { out += segment[i]; i++; }
+      }
+      return out;
+    }
+
+    // A bare '|' inside $...$ on a table row is eaten by markdown-it's table parser
+    // and shatters the formula. Escape in-math pipes to {\vert} before parsing.
+    function protectTablePipesInMath(source) {
+      let fence = '';
+      return source.split('\n').map(function (line) {
+        const fenceMatch = line.match(/^\s*(`{3,}|~{3,})/);
+        if (fenceMatch) {
+          const marker = fenceMatch[1][0];
+          fence = fence ? (fence === marker ? '' : fence) : marker;
+          return line;
+        }
+        if (fence || line.indexOf('|') < 0) return line;
+        return protectPipesInMathSpans(line);
+      }).join('\n');
+    }
+
     function normalizeMarkdown(source) {
       const safeSource = normalizeAlternateMathDelimiters(String(source || '')
         .replace(/<script[\s\S]*?<\/script>/gi, '')
         .replace(/<script\b[^>]*>/gi, ''));
-      return normalizeMathFences(safeSource)
+      return protectTablePipesInMath(normalizeMathFences(safeSource)
         .replace(/^(\s*)-\s+\[\s\]\s+/gm, '$1- \u2610 ')
-        .replace(/^(\s*)-\s+\[[xX]\]\s+/gm, '$1- \u2611 ');
+        .replace(/^(\s*)-\s+\[[xX]\]\s+/gm, '$1- \u2611 '));
     }
 
     function normalizeMathFences(source) {
