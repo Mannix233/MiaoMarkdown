@@ -147,6 +147,61 @@ app.whenReady().then(async () => {
     );
     assert.ok(String(invalidResult).startsWith("__ERROR__:"), "invalid formula was not blocked");
 
+    const thinLineSvg = Buffer.from([
+      '<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="420" viewBox="0 0 1120 420">',
+      '<rect width="1120" height="420" fill="white"/>',
+      '<rect x="2" y="2" width="1116" height="416" fill="none" stroke="#777" stroke-width="1"/>',
+      '<path d="M80 210 H420 M420 210 L400 198 M420 210 L400 222" fill="none" stroke="#777" stroke-width="1"/>',
+      '</svg>',
+    ].join('')).toString('base64');
+    await renderCase(window, {
+      name: "thin image",
+      markdown: `<img src="data:image/svg+xml;base64,${thinLineSvg}" alt="thin line test">`,
+      minimumMath: 0,
+    }, requestId++);
+    const thinLineResult = await window.webContents.executeJavaScript(`(function () {
+      const image = document.querySelector('#content img');
+      const canvas = document.createElement('canvas');
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const context = canvas.getContext('2d');
+      context.drawImage(image, 0, 0);
+      const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      let nonBinary = 0;
+      let bestRow = 0;
+      let bestColumn = 0;
+      for (let y = 0; y < canvas.height; y += 1) {
+        let black = 0;
+        for (let x = 0; x < canvas.width; x += 1) {
+          const value = data[(y * canvas.width + x) * 4];
+          if (value !== 0 && value !== 255) nonBinary += 1;
+          if (value === 0) black += 1;
+        }
+        bestRow = Math.max(bestRow, black / canvas.width);
+      }
+      for (let x = 0; x < canvas.width; x += 1) {
+        let black = 0;
+        for (let y = 0; y < canvas.height; y += 1) {
+          if (data[(y * canvas.width + x) * 4] === 0) black += 1;
+        }
+        bestColumn = Math.max(bestColumn, black / canvas.height);
+      }
+      return {
+        processed: image.dataset.miaoThermalProcessed,
+        width: canvas.width,
+        displayWidth: Math.round(image.getBoundingClientRect().width),
+        nonBinary,
+        bestRow,
+        bestColumn,
+      };
+    })()`);
+    assert.equal(thinLineResult.processed, 'true', 'Android image processor did not run');
+    assert.equal(thinLineResult.width, thinLineResult.displayWidth, 'image was not processed at final rendered width');
+    assert.ok(thinLineResult.width <= 384, 'processed image exceeds the printer width');
+    assert.equal(thinLineResult.nonBinary, 0, 'processed image is not strictly black and white');
+    assert.ok(thinLineResult.bestRow > 0.95, 'thin horizontal frame did not survive downscaling');
+    assert.ok(thinLineResult.bestColumn > 0.95, 'thin vertical frame did not survive downscaling');
+
     const image = await window.webContents.capturePage();
     const bitmap = image.toBitmap();
     assert.ok(bitmap.some(value => value < 245), "captured preview is blank");

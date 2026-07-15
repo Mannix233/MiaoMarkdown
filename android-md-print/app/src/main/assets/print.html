@@ -24,6 +24,7 @@
   </script>
   <script src="mathjax-tex-svg-full.js"></script>
   <script src="markdown-it.min.js"></script>
+  <script src="thermal-image.js"></script>
   <style>
     html,
     body {
@@ -642,6 +643,10 @@
           markMathCells(content);
           fitMath(content);
           return waitForImages(content);
+        })
+        .then(function () {
+          if (!isActiveRequest(requestId)) return '__STALE__';
+          return window.MiaoThermalImages.process(content);
         })
         .then(function () {
           if (!isActiveRequest(requestId)) return '__STALE__';
