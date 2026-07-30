@@ -13,7 +13,8 @@ const editor = fs.readFileSync(
 );
 
 assert.match(printHtml, /bm:\s*\['\\\\boldsymbol\{#1\}',\s*1\]/);
-assert.match(printHtml, /stroke-width:\s*0\.2px/);
+assert.match(printHtml, /stroke-width:\s*0\.15px/);
+assert.doesNotMatch(printHtml, /stroke-width:\s*0\.[2-9]\d*px/);
 assert.match(printHtml, /strong mjx-container\[jax="SVG"\]/);
 assert.match(printHtml, /const minimum = hasExplicitMinimum \? minimumScale : 0\.55/);
 assert.match(editor, /addTool\("粗体", this::toggleBold\)/);

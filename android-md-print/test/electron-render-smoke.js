@@ -86,6 +86,10 @@ async function renderCase(window, testCase, requestId) {
         const node = content.querySelector(selector);
         return node ? parseFloat(getComputedStyle(node).strokeWidth) : 0;
       };
+      const strokePaint = function (selector) {
+        const node = content.querySelector(selector);
+        return node ? getComputedStyle(node).stroke : 'none';
+      };
       return {
         height: Number(height),
         rawResult: String(height),
@@ -100,6 +104,8 @@ async function renderCase(window, testCase, requestId) {
         listInsideCenter: Boolean(content.querySelector('.align-center li')),
         normalFormulaStroke: strokeWidth('#normal-formula mjx-container svg path'),
         legacyBoldFormulaStroke: strokeWidth('#legacy-bold-formula mjx-container svg path'),
+        normalFormulaStrokePaint: strokePaint('#normal-formula mjx-container svg path'),
+        legacyBoldFormulaStrokePaint: strokePaint('#legacy-bold-formula mjx-container svg path'),
         bmFormula: Boolean(content.querySelector('#bm-formula mjx-container')),
         tableMathCells: content.querySelectorAll('td.math-cell, th.math-cell').length
       };
@@ -139,10 +145,13 @@ app.whenReady().then(async () => {
 
     const formulaBoldResult = await renderCase(window, cases[5], requestId++);
     assert.equal(formulaBoldResult.bmFormula, true, "\\bm formula compatibility macro was not rendered");
-    assert.ok(formulaBoldResult.normalFormulaStroke <= 0.25, "normal formulas are too heavily outlined");
+    assert.equal(formulaBoldResult.normalFormulaStrokePaint, "none", "normal formulas received an artificial outline");
     assert.ok(
-      formulaBoldResult.legacyBoldFormulaStroke > formulaBoldResult.normalFormulaStroke,
-      "explicitly bold formula did not receive a distinct thermal edge"
+      formulaBoldResult.legacyBoldFormulaStrokePaint !== "none",
+      `legacy Markdown-bold formula edge is missing: ${JSON.stringify({
+        stroke: formulaBoldResult.legacyBoldFormulaStrokePaint,
+        width: formulaBoldResult.legacyBoldFormulaStroke,
+      })}`
     );
     assert.ok(formulaBoldResult.tableMathCells >= 2, "formula-only table cells were not recognized");
 
