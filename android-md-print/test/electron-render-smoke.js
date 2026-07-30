@@ -55,6 +55,21 @@ const cases = [
     ].join("\n"),
     minimumMath: 0,
   },
+  {
+    name: "semantic formula bold",
+    markdown: [
+      '<span id="normal-formula">$\\alpha+\\nabla+x_1$</span>',
+      '<strong id="legacy-bold-formula">$\\alpha+\\nabla+x_1$</strong>',
+      '<span id="boldsymbol-formula">$\\boldsymbol{\\alpha+\\nabla+x_1}$</span>',
+      '<span id="bm-formula">$\\bm{\\beta+\\Gamma+y_2}$</span>',
+      "",
+      "| Type | Formula |",
+      "| --- | --- |",
+      "| Normal | $\\frac{x_1}{s+1}$ |",
+      "| Bold | $\\boldsymbol{\\frac{x_1}{s+1}}$ |",
+    ].join("\n"),
+    minimumMath: 6,
+  },
 ];
 
 async function renderCase(window, testCase, requestId) {
@@ -67,6 +82,10 @@ async function renderCase(window, testCase, requestId) {
         const rect = node.getBoundingClientRect();
         return rect.right > bounds.right + 1 || rect.left < bounds.left - 1;
       });
+      const strokeWidth = function (selector) {
+        const node = content.querySelector(selector);
+        return node ? parseFloat(getComputedStyle(node).strokeWidth) : 0;
+      };
       return {
         height: Number(height),
         rawResult: String(height),
@@ -78,7 +97,11 @@ async function renderCase(window, testCase, requestId) {
         large: Boolean(content.querySelector('.font-xl')),
         footnotes: Boolean(content.querySelector('.footnotes')),
         strongInsideCenter: Boolean(content.querySelector('.align-center strong')),
-        listInsideCenter: Boolean(content.querySelector('.align-center li'))
+        listInsideCenter: Boolean(content.querySelector('.align-center li')),
+        normalFormulaStroke: strokeWidth('#normal-formula mjx-container svg path'),
+        legacyBoldFormulaStroke: strokeWidth('#legacy-bold-formula mjx-container svg path'),
+        bmFormula: Boolean(content.querySelector('#bm-formula mjx-container')),
+        tableMathCells: content.querySelectorAll('td.math-cell, th.math-cell').length
       };
     })
   `);
@@ -113,6 +136,15 @@ app.whenReady().then(async () => {
     assert.equal(helperResult.footnotes, true, "footnote section was not rendered");
     assert.equal(helperResult.strongInsideCenter, true, "Markdown bold was not parsed inside container");
     assert.equal(helperResult.listInsideCenter, true, "Markdown list was not parsed inside container");
+
+    const formulaBoldResult = await renderCase(window, cases[5], requestId++);
+    assert.equal(formulaBoldResult.bmFormula, true, "\\bm formula compatibility macro was not rendered");
+    assert.ok(formulaBoldResult.normalFormulaStroke <= 0.25, "normal formulas are too heavily outlined");
+    assert.ok(
+      formulaBoldResult.legacyBoldFormulaStroke > formulaBoldResult.normalFormulaStroke,
+      "explicitly bold formula did not receive a distinct thermal edge"
+    );
+    assert.ok(formulaBoldResult.tableMathCells >= 2, "formula-only table cells were not recognized");
 
     const codeResult = await renderCase(window, {
       name: "code protection",
@@ -205,7 +237,7 @@ app.whenReady().then(async () => {
     const image = await window.webContents.capturePage();
     const bitmap = image.toBitmap();
     assert.ok(bitmap.some(value => value < 245), "captured preview is blank");
-    console.log(`render smoke tests passed: ${cases.length + 4}`);
+    console.log(`render smoke tests passed: ${cases.length + 5}`);
   } finally {
     window.destroy();
     app.quit();

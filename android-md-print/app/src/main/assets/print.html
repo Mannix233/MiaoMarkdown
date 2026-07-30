@@ -9,6 +9,9 @@
         inlineMath: [['$', '$'], ['\\(', '\\)']],
         displayMath: [['$$', '$$'], ['\\[', '\\]']],
         processEscapes: true,
+        macros: {
+          bm: ['\\boldsymbol{#1}', 1]
+        },
         packages: {'[+]': ['ams', 'boldsymbol', 'braket', 'cancel', 'color', 'configmacros', 'html', 'mathtools', 'mhchem', 'newcommand', 'physics', 'unicode']}
       },
       loader: {
@@ -231,16 +234,21 @@
       text-align: left !important;
     }
 
-    /* Thermal clarity (mirrors desktop): fatten MathJax formula glyphs + fraction
-       bars, and bold small table-cell CJK, so thin strokes survive 384px thermal
-       printing. Stroke is non-scaling so it stays a constant hairline regardless of
-       the SVG scale. */
+    /* A light, non-scaling edge keeps antialiased formula hairlines printable without
+       making the 384px preview look artificially bold. Explicit bold formulas use
+       MathJax's bold glyphs instead of a heavy global outline. */
     mjx-container[jax="SVG"] svg path,
     mjx-container[jax="SVG"] svg rect,
     mjx-container[jax="SVG"] svg line {
       stroke: currentColor;
-      stroke-width: 0.5px;
+      stroke-width: 0.2px;
       vector-effect: non-scaling-stroke;
+    }
+
+    strong mjx-container[jax="SVG"] svg path,
+    strong mjx-container[jax="SVG"] svg rect,
+    strong mjx-container[jax="SVG"] svg line {
+      stroke-width: 0.35px;
     }
 
     td {
@@ -502,10 +510,15 @@
     function markMathCells(root) {
       Array.from(root.querySelectorAll('th, td')).forEach(cell => {
         cell.classList.remove('math-cell');
-        const math = cell.children.length === 1 ? cell.children[0] : null;
+        const onlyChild = cell.children.length === 1 ? cell.children[0] : null;
+        const math = onlyChild && onlyChild.tagName === 'MJX-CONTAINER'
+          ? onlyChild
+          : (onlyChild && onlyChild.tagName === 'STRONG' && onlyChild.children.length === 1
+            ? onlyChild.children[0]
+            : null);
         if (!math || math.tagName !== 'MJX-CONTAINER') return;
         const onlyMath = Array.from(cell.childNodes).every(node => {
-          return node === math || (node.nodeType === Node.TEXT_NODE && !node.textContent.trim());
+          return node === onlyChild || (node.nodeType === Node.TEXT_NODE && !node.textContent.trim());
         });
         if (onlyMath) {
           cell.classList.add('math-cell');
@@ -515,7 +528,7 @@
 
     function shrinkTableToFit(table) {
       const fontSteps = tableHasComplexContent(table)
-        ? [0.8, 0.76, 0.72, 0.68, 0.64]
+        ? [0.82, 0.78, 0.74]
         : [0.82, 0.78, 0.74, 0.7, 0.66];
       for (const size of fontSteps) {
         table.style.fontSize = size.toFixed(2) + 'em';
@@ -576,7 +589,8 @@
     }
 
     function fitMath(root, minimumScale) {
-      const minimum = typeof minimumScale === 'number' ? minimumScale : 0.35;
+      const hasExplicitMinimum = typeof minimumScale === 'number';
+      const minimum = hasExplicitMinimum ? minimumScale : 0.55;
       Array.from(root.querySelectorAll('mjx-container[jax="SVG"]')).forEach(node => {
         const svg = node.querySelector('svg');
         if (!svg) return;
@@ -588,7 +602,7 @@
         if (box.width > parentWidth) {
           const scale = Math.max(minimum, parentWidth / box.width);
           node.style.fontSize = (scale * 100).toFixed(1) + '%';
-          if (svg.getBoundingClientRect().width > parentWidth) {
+          if (!hasExplicitMinimum && svg.getBoundingClientRect().width > parentWidth) {
             svg.style.width = '100%';
             svg.style.height = 'auto';
           }

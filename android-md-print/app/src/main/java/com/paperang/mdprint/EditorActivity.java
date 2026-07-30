@@ -191,7 +191,7 @@ public class EditorActivity extends Activity {
 
     private void showTextTools() {
         clearTools();
-        addTool("粗体", () -> toggleWrap("**", "**", "文字"));
+        addTool("粗体", this::toggleBold);
         addTool("斜体", () -> toggleWrap("*", "*", "文字"));
         addTool("下划线", () -> toggleWrap("<u>", "</u>", "文字"));
         addTool("删除线", () -> toggleWrap("~~", "~~", "文字"));
@@ -378,6 +378,169 @@ public class EditorActivity extends Activity {
         text.replace(start, end, before + inner + after);
         int innerStart = start + before.length();
         editor.setSelection(innerStart, innerStart + inner.length());
+    }
+
+    private void toggleBold() {
+        Editable text = editor.getText();
+        int start = selectionStart();
+        int end = selectionEnd();
+        String selected = text.subSequence(start, end).toString();
+
+        boolean markdownWrapped = selected.startsWith("**")
+                && selected.endsWith("**")
+                && selected.length() >= 4;
+        String formulaCandidate = markdownWrapped
+                ? selected.substring(2, selected.length() - 2)
+                : selected;
+        FormulaParts wholeFormula = parseExactFormula(formulaCandidate);
+        if (wholeFormula != null) {
+            String body = markdownWrapped
+                    ? wholeFormula.body
+                    : toggleFormulaBody(wholeFormula.body);
+            String replacement = wholeFormula.open + body + wholeFormula.close;
+            text.replace(start, end, replacement);
+            int bodyStart = start + wholeFormula.open.length();
+            editor.setSelection(bodyStart, bodyStart + body.length());
+            return;
+        }
+
+        MathSpan enclosingMath = findEnclosingMath(text.toString(), start, end);
+        if (enclosingMath != null) {
+            toggleFormulaSelection(text, start, end);
+            return;
+        }
+        toggleWrap("**", "**", "文字");
+    }
+
+    private FormulaParts parseExactFormula(String value) {
+        if (value == null) return null;
+        String[][] delimiters = {
+                {"$$", "$$"},
+                {"\\[", "\\]"},
+                {"\\(", "\\)"},
+                {"$", "$"}
+        };
+        for (String[] pair : delimiters) {
+            if (value.startsWith(pair[0])
+                    && value.endsWith(pair[1])
+                    && value.length() >= pair[0].length() + pair[1].length()) {
+                return new FormulaParts(
+                        pair[0],
+                        value.substring(pair[0].length(), value.length() - pair[1].length()),
+                        pair[1]);
+            }
+        }
+        return null;
+    }
+
+    private String toggleFormulaBody(String body) {
+        int leading = 0;
+        while (leading < body.length() && Character.isWhitespace(body.charAt(leading))) leading++;
+        int trailing = body.length();
+        while (trailing > leading && Character.isWhitespace(body.charAt(trailing - 1))) trailing--;
+        String prefixSpace = body.substring(0, leading);
+        String suffixSpace = body.substring(trailing);
+        String core = body.substring(leading, trailing);
+        for (String command : new String[]{"\\boldsymbol{", "\\bm{", "\\mathbf{"}) {
+            if (core.startsWith(command)
+                    && core.endsWith("}")
+                    && findMatchingBrace(core, command.length() - 1) == core.length() - 1) {
+                return prefixSpace + core.substring(command.length(), core.length() - 1) + suffixSpace;
+            }
+        }
+        return prefixSpace + "\\boldsymbol{" + core + "}" + suffixSpace;
+    }
+
+    private void toggleFormulaSelection(Editable text, int start, int end) {
+        String selected = text.subSequence(start, end).toString();
+        for (String command : new String[]{"\\boldsymbol{", "\\bm{", "\\mathbf{"}) {
+            if (selected.startsWith(command)
+                    && selected.endsWith("}")
+                    && findMatchingBrace(selected, command.length() - 1) == selected.length() - 1) {
+                String inner = selected.substring(command.length(), selected.length() - 1);
+                text.replace(start, end, inner);
+                editor.setSelection(start, start + inner.length());
+                return;
+            }
+            int wrapperStart = start - command.length();
+            if (wrapperStart >= 0
+                    && end < text.length()
+                    && text.subSequence(wrapperStart, start).toString().equals(command)
+                    && text.charAt(end) == '}'
+                    && findMatchingBrace(text.toString(), wrapperStart + command.length() - 1) == end) {
+                text.delete(end, end + 1);
+                text.delete(wrapperStart, start);
+                editor.setSelection(wrapperStart, end - command.length());
+                return;
+            }
+        }
+
+        String inner = selected.isEmpty() ? "x" : selected;
+        String command = "\\boldsymbol{";
+        text.replace(start, end, command + inner + "}");
+        int innerStart = start + command.length();
+        editor.setSelection(innerStart, innerStart + inner.length());
+    }
+
+    private MathSpan findEnclosingMath(String source, int start, int end) {
+        int index = 0;
+        while (index < source.length()) {
+            String open = null;
+            String close = null;
+            if (source.startsWith("$$", index) && !isEscaped(source, index)) {
+                open = "$$";
+                close = "$$";
+            } else if (source.startsWith("\\[", index)) {
+                open = "\\[";
+                close = "\\]";
+            } else if (source.startsWith("\\(", index)) {
+                open = "\\(";
+                close = "\\)";
+            } else if (source.charAt(index) == '$' && !isEscaped(source, index)) {
+                open = "$";
+                close = "$";
+            }
+            if (open == null) {
+                index++;
+                continue;
+            }
+            int bodyStart = index + open.length();
+            int closeStart = findMathClose(source, bodyStart, close);
+            if (closeStart < 0) return null;
+            if (start >= bodyStart && end <= closeStart) {
+                return new MathSpan(bodyStart, closeStart);
+            }
+            index = closeStart + close.length();
+        }
+        return null;
+    }
+
+    private int findMathClose(String source, int from, String delimiter) {
+        int index = from;
+        while (index <= source.length() - delimiter.length()) {
+            index = source.indexOf(delimiter, index);
+            if (index < 0) return -1;
+            if (!delimiter.startsWith("$") || !isEscaped(source, index)) return index;
+            index += delimiter.length();
+        }
+        return -1;
+    }
+
+    private boolean isEscaped(String source, int index) {
+        int slashes = 0;
+        for (int i = index - 1; i >= 0 && source.charAt(i) == '\\'; i--) slashes++;
+        return (slashes & 1) == 1;
+    }
+
+    private int findMatchingBrace(String value, int openIndex) {
+        if (openIndex < 0 || openIndex >= value.length() || value.charAt(openIndex) != '{') return -1;
+        int depth = 0;
+        for (int i = openIndex; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '{') depth++;
+            if (c == '}' && --depth == 0) return i;
+        }
+        return -1;
     }
 
     private void wrapBlock(String blockName, String placeholder) {
@@ -676,6 +839,28 @@ public class EditorActivity extends Activity {
             this.openStart = openStart;
             this.openEnd = openEnd;
             this.contentStart = contentStart;
+        }
+    }
+
+    private static class FormulaParts {
+        final String open;
+        final String body;
+        final String close;
+
+        FormulaParts(String open, String body, String close) {
+            this.open = open;
+            this.body = body;
+            this.close = close;
+        }
+    }
+
+    private static class MathSpan {
+        final int bodyStart;
+        final int bodyEnd;
+
+        MathSpan(int bodyStart, int bodyEnd) {
+            this.bodyStart = bodyStart;
+            this.bodyEnd = bodyEnd;
         }
     }
 
