@@ -21,12 +21,25 @@ assert.match(activity, /BLE_GATT_CHUNK_BYTES = 20/);
 assert.match(activity, /BLE_RASTER_FRAME_BYTES = WIDTH_BYTES \* 32/);
 assert.match(activity, /onDescriptorWrite\(/);
 assert.match(activity, /startBleProtocolProbe\(\)/);
-assert.match(activity, /handleBleNotification\(copy\)/);
+assert.match(activity, /ff00Service\.getCharacteristic\(PAPERANG_FF00_NOTIFY_UUID\)/);
+assert.match(activity, /ff00Service\.getCharacteristic\(PAPERANG_FF00_STATUS_UUID\)/);
+assert.match(activity, /bleNotifySubscriptionQueue/);
+assert.match(activity, /subscribeNextBleNotification\(/);
+assert.match(activity, /handleBleNotification\(sourceUuid, copy\)/);
+assert.match(activity, /onCharacteristicChanged\(\s*BluetoothGatt g,\s*BluetoothGattCharacteristic c,\s*byte\[\] value\)/);
 assert.match(activity, /command == COMMAND_BATTERY_STATUS && bleAwaitingBattery/);
 assert.match(activity, /return classicOutput != null \|\| bleProtocolReady/);
 assert.match(activity, /WRITE_TYPE_NO_RESPONSE/);
+assert.match(activity, /PROPERTY_WRITE_NO_RESPONSE/);
+assert.match(activity, /writeCharacteristic\(characteristic, value, writeType\)/);
+assert.match(activity, /writeDescriptor\(descriptor, value\)/);
 assert.match(activity, /Arrays\.copyOfRange\(packet, offset, end\)/);
 assert.match(activity, /scheduleBleReconnect\(\)/);
+assert.match(activity, /BLE_BACKGROUND_RETRY_DELAY_MS = 15000L/);
+assert.doesNotMatch(
+  activity,
+  /ff00Notify == null[\s\S]{0,120}PAPERANG_FF00_STATUS_UUID/,
+);
 assert.doesNotMatch(activity, /setDeviceStatus\("BLE 就绪", route\)/);
 assert.doesNotMatch(
   activity,

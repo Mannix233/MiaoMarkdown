@@ -12,6 +12,7 @@ import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
 import android.bluetooth.BluetoothSocket;
+import android.bluetooth.BluetoothStatusCodes;
 import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanRecord;
@@ -55,8 +56,10 @@ import java.util.Arrays;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -112,9 +115,11 @@ public class MainActivity extends Activity {
     private static final int MAX_BLE_RECONNECT_ATTEMPTS = 2;
     private static final long BLE_SCAN_WINDOW_MS = 12000L;
     private static final long BLE_SCAN_RETRY_DELAY_MS = 1200L;
-    private static final long BLE_CONNECT_TIMEOUT_MS = 30000L;
+    private static final long BLE_BACKGROUND_RETRY_DELAY_MS = 15000L;
+    private static final long BLE_CONNECT_TIMEOUT_MS = 40000L;
     private static final long BLE_PROTOCOL_REPLY_TIMEOUT_MS = 5000L;
-    private static final long BLE_WRITE_WATCHDOG_MS = 450L;
+    private static final long BLE_NO_RESPONSE_WATCHDOG_MS = 300L;
+    private static final long BLE_WITH_RESPONSE_WATCHDOG_MS = 3000L;
     private static final int BLE_GATT_CHUNK_BYTES = 20;
     private static final int BLE_RASTER_FRAME_BYTES = WIDTH_BYTES * 32;
     private static final int COMMAND_PRINT_DATA = 0;
@@ -131,12 +136,15 @@ public class MainActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable previewRefreshRunnable = () -> renderMarkdownInWebView(null);
     private final Deque<byte[]> bleWriteQueue = new ArrayDeque<>();
+    private final Deque<BluetoothGattCharacteristic> bleNotifySubscriptionQueue = new ArrayDeque<>();
+    private final List<BluetoothGattCharacteristic> bleActiveNotifyCharacteristics = new ArrayList<>();
+    private final List<BluetoothGattCharacteristic> bleFallbackNotifyCharacteristics = new ArrayList<>();
+    private final Map<UUID, byte[]> bleNotificationBuffers = new HashMap<>();
     private final ExecutorService classicWriter = Executors.newSingleThreadExecutor();
     private boolean bleWriting = false;
     private byte[] bleInFlightPacket;
     private int bleWriteRetryCount = 0;
     private int crcKey = STANDARD_CRC_KEY;
-    private byte[] bleNotificationBuffer = new byte[0];
 
     private EditText editor;
     private TextView preview;
@@ -156,16 +164,17 @@ public class MainActivity extends Activity {
     private Button previewTab;
     private BluetoothGatt gatt;
     private BluetoothGattCharacteristic bleWriteCharacteristic;
-    private BluetoothGattCharacteristic bleNotifyCharacteristic;
+    private BluetoothGattCharacteristic blePendingNotifyCharacteristic;
     private BluetoothGattCharacteristic bleFallbackWriteCharacteristic;
-    private BluetoothGattCharacteristic bleFallbackNotifyCharacteristic;
     private String bleRouteLabel = "";
     private String bleFallbackRouteLabel = "";
+    private String bleReplyLabel = "";
     private BluetoothLeScanner scanner;
     private boolean bleScanInProgress = false;
     private int bleScanAttempt = 0;
     private int bleScanGeneration = 0;
     private int bleConnectionGeneration = 0;
+    private int bleProtocolAttemptGeneration = 0;
     private int bleReconnectAttempt = 0;
     private boolean bleReconnectScheduled = false;
     private boolean bleProtocolProbePending = false;
@@ -744,7 +753,7 @@ public class MainActivity extends Activity {
                 handler.postDelayed(() -> {
                     bleReconnectScheduled = false;
                     if (!readySilently()) startBleScanAttempt();
-                }, 5000L);
+                }, BLE_BACKGROUND_RETRY_DELAY_MS);
                 return;
             }
             bleReconnectAttempt++;
@@ -763,18 +772,22 @@ public class MainActivity extends Activity {
         if (target == null) return;
         if (gatt == target) {
             bleConnectionGeneration++;
+            bleProtocolAttemptGeneration++;
             gatt = null;
             bleWriteCharacteristic = null;
-            bleNotifyCharacteristic = null;
+            blePendingNotifyCharacteristic = null;
             bleFallbackWriteCharacteristic = null;
-            bleFallbackNotifyCharacteristic = null;
+            bleNotifySubscriptionQueue.clear();
+            bleActiveNotifyCharacteristics.clear();
+            bleFallbackNotifyCharacteristics.clear();
+            bleNotificationBuffers.clear();
             bleRouteLabel = "";
             bleFallbackRouteLabel = "";
+            bleReplyLabel = "";
             bleWriteQueue.clear();
             bleWriting = false;
             bleInFlightPacket = null;
             bleWriteRetryCount = 0;
-            bleNotificationBuffer = new byte[0];
             bleProtocolProbePending = false;
             bleAwaitingBattery = false;
             bleProtocolReady = false;
@@ -832,31 +845,36 @@ public class MainActivity extends Activity {
             }
 
             BluetoothGattCharacteristic ff00Write = null;
-            BluetoothGattCharacteristic ff00Notify = null;
+            List<BluetoothGattCharacteristic> ff00Notifies = new ArrayList<>();
             BluetoothGattService ff00Service = g.getService(PAPERANG_FF00_SERVICE_UUID);
             if (ff00Service != null) {
                 ff00Write = ff00Service.getCharacteristic(PAPERANG_FF00_WRITE_UUID);
-                ff00Notify = ff00Service.getCharacteristic(PAPERANG_FF00_NOTIFY_UUID);
-                if (ff00Notify == null) {
-                    ff00Notify = ff00Service.getCharacteristic(PAPERANG_FF00_STATUS_UUID);
-                }
+                addNotifyCharacteristic(
+                        ff00Notifies,
+                        ff00Service.getCharacteristic(PAPERANG_FF00_NOTIFY_UUID));
+                addNotifyCharacteristic(
+                        ff00Notifies,
+                        ff00Service.getCharacteristic(PAPERANG_FF00_STATUS_UUID));
             }
 
             BluetoothGattCharacteristic legacyWrite = null;
-            BluetoothGattCharacteristic legacyNotify = null;
+            List<BluetoothGattCharacteristic> legacyNotifies = new ArrayList<>();
             BluetoothGattService legacyService = g.getService(PAPERANG_SERVICE_UUID);
             if (legacyService != null) {
                 legacyWrite = legacyService.getCharacteristic(PAPERANG_WRITE_UUID);
-                legacyNotify = legacyService.getCharacteristic(PAPERANG_NOTIFY_UUID);
+                addNotifyCharacteristic(
+                        legacyNotifies,
+                        legacyService.getCharacteristic(PAPERANG_NOTIFY_UUID));
             }
 
-            if (ff00Write != null && ff00Notify != null) {
+            if (ff00Write != null && !ff00Notifies.isEmpty()) {
                 bleFallbackWriteCharacteristic = legacyWrite;
-                bleFallbackNotifyCharacteristic = legacyNotify;
+                bleFallbackNotifyCharacteristics.clear();
+                bleFallbackNotifyCharacteristics.addAll(legacyNotifies);
                 bleFallbackRouteLabel = "通道：8841";
-                configureBleProtocolChannel(g, ff00Write, ff00Notify, "通道：FF02");
-            } else if (legacyWrite != null && legacyNotify != null) {
-                configureBleProtocolChannel(g, legacyWrite, legacyNotify, "通道：8841");
+                configureBleProtocolChannel(g, ff00Write, ff00Notifies, "通道：FF02");
+            } else if (legacyWrite != null && !legacyNotifies.isEmpty()) {
+                configureBleProtocolChannel(g, legacyWrite, legacyNotifies, "通道：8841");
             } else {
                 log("没有找到可收发的 Paperang 4953/FF00 通道，正在重新扫描。");
                 closeGattConnection(g);
@@ -866,13 +884,18 @@ public class MainActivity extends Activity {
 
         @Override
         public void onDescriptorWrite(BluetoothGatt g, BluetoothGattDescriptor descriptor, int statusCode) {
-            if (g != gatt || descriptor.getCharacteristic() != bleNotifyCharacteristic) return;
+            if (g != gatt || descriptor.getCharacteristic() != blePendingNotifyCharacteristic) return;
+            BluetoothGattCharacteristic completed = descriptor.getCharacteristic();
             handler.post(() -> {
                 if (statusCode == BluetoothGatt.GATT_SUCCESS) {
-                    startBleProtocolProbe();
+                    bleActiveNotifyCharacteristics.add(completed);
+                    log("已订阅 BLE 回执：" + characteristicLabel(completed));
                 } else {
-                    failBleProtocolChannel("BLE 通知启用失败：" + statusCode);
+                    log("BLE 回执 " + characteristicLabel(completed)
+                            + " 订阅失败：" + statusCode + "，继续尝试其他回执口。");
                 }
+                blePendingNotifyCharacteristic = null;
+                subscribeNextBleNotification(g);
             });
         }
 
@@ -884,55 +907,126 @@ public class MainActivity extends Activity {
 
         @Override
         public void onCharacteristicChanged(BluetoothGatt g, BluetoothGattCharacteristic c) {
-            if (g != gatt || c != bleNotifyCharacteristic) return;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) return;
             byte[] value = c.getValue();
             if (value == null) return;
-            byte[] copy = Arrays.copyOf(value, value.length);
-            handler.post(() -> handleBleNotification(copy));
+            dispatchBleNotification(g, c, value);
+        }
+
+        @Override
+        public void onCharacteristicChanged(
+                BluetoothGatt g,
+                BluetoothGattCharacteristic c,
+                byte[] value) {
+            dispatchBleNotification(g, c, value);
         }
     };
+
+    private void addNotifyCharacteristic(
+            List<BluetoothGattCharacteristic> target,
+            BluetoothGattCharacteristic characteristic) {
+        if (characteristic == null) return;
+        int properties = characteristic.getProperties();
+        if ((properties & (BluetoothGattCharacteristic.PROPERTY_NOTIFY
+                | BluetoothGattCharacteristic.PROPERTY_INDICATE)) != 0) {
+            target.add(characteristic);
+        }
+    }
 
     private void configureBleProtocolChannel(
             BluetoothGatt targetGatt,
             BluetoothGattCharacteristic write,
-            BluetoothGattCharacteristic notify,
+            List<BluetoothGattCharacteristic> notifies,
             String routeLabel) {
+        bleProtocolAttemptGeneration++;
         bleWriteQueue.clear();
         bleWriting = false;
         bleInFlightPacket = null;
         bleWriteRetryCount = 0;
-        bleNotificationBuffer = new byte[0];
+        bleNotifySubscriptionQueue.clear();
+        bleNotifySubscriptionQueue.addAll(notifies);
+        bleActiveNotifyCharacteristics.clear();
+        bleNotificationBuffers.clear();
+        blePendingNotifyCharacteristic = null;
         bleProtocolProbePending = false;
         bleAwaitingBattery = false;
         bleProtocolReady = false;
         bleWriteCharacteristic = write;
-        bleNotifyCharacteristic = notify;
         bleRouteLabel = routeLabel;
+        bleReplyLabel = "";
         crcKey = STANDARD_CRC_KEY;
-        setDeviceStatus("BLE 正在验证打印协议", routeLabel);
+        setDeviceStatus("BLE 正在订阅打印机回执", routeLabel);
+        subscribeNextBleNotification(targetGatt);
+    }
 
+    private void subscribeNextBleNotification(BluetoothGatt targetGatt) {
+        if (targetGatt != gatt) return;
+        BluetoothGattCharacteristic notify = bleNotifySubscriptionQueue.pollFirst();
+        if (notify == null) {
+            if (bleActiveNotifyCharacteristics.isEmpty()) {
+                failBleProtocolChannel("BLE 没有可用的通知回执口");
+                return;
+            }
+            StringBuilder subscribed = new StringBuilder();
+            for (BluetoothGattCharacteristic characteristic : bleActiveNotifyCharacteristics) {
+                if (subscribed.length() > 0) subscribed.append("/");
+                subscribed.append(characteristicLabel(characteristic));
+            }
+            setDeviceStatus("BLE 正在验证打印协议", bleRouteLabel);
+            log("BLE 回执订阅完成：" + subscribed + "。");
+            handler.postDelayed(this::startBleProtocolProbe, 200L);
+            return;
+        }
+        blePendingNotifyCharacteristic = notify;
         try {
             if (!targetGatt.setCharacteristicNotification(notify, true)) {
-                failBleProtocolChannel("BLE 通知未能启用");
+                log("BLE 回执 " + characteristicLabel(notify)
+                        + " 未能在本机启用，继续尝试其他回执口。");
+                blePendingNotifyCharacteristic = null;
+                subscribeNextBleNotification(targetGatt);
                 return;
             }
             BluetoothGattDescriptor descriptor = notify.getDescriptor(CCCD_UUID);
             if (descriptor == null) {
-                failBleProtocolChannel("BLE 通知描述符不存在");
+                log("BLE 回执 " + characteristicLabel(notify)
+                        + " 没有 CCCD，继续尝试其他回执口。");
+                blePendingNotifyCharacteristic = null;
+                subscribeNextBleNotification(targetGatt);
                 return;
             }
-            descriptor.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
-            if (!targetGatt.writeDescriptor(descriptor)) {
-                failBleProtocolChannel("BLE 通知配置未能写入");
+            int properties = notify.getProperties();
+            byte[] enableValue = (properties & BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0
+                    ? BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    : BluetoothGattDescriptor.ENABLE_INDICATION_VALUE;
+            if (!writeBleDescriptor(targetGatt, descriptor, enableValue)) {
+                log("BLE 回执 " + characteristicLabel(notify)
+                        + " 的订阅写入未启动，继续尝试其他回执口。");
+                blePendingNotifyCharacteristic = null;
+                subscribeNextBleNotification(targetGatt);
             }
         } catch (SecurityException e) {
             failBleProtocolChannel("BLE 通知权限被拒绝");
         }
     }
 
+    @SuppressWarnings("deprecation")
+    private boolean writeBleDescriptor(
+            BluetoothGatt targetGatt,
+            BluetoothGattDescriptor descriptor,
+            byte[] value) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            return targetGatt.writeDescriptor(descriptor, value) == BluetoothStatusCodes.SUCCESS;
+        }
+        descriptor.setValue(value);
+        return targetGatt.writeDescriptor(descriptor);
+    }
+
     private void startBleProtocolProbe() {
-        if (gatt == null || bleWriteCharacteristic == null || bleNotifyCharacteristic == null) return;
+        if (gatt == null
+                || bleWriteCharacteristic == null
+                || bleActiveNotifyCharacteristics.isEmpty()) return;
         final int connectionGeneration = bleConnectionGeneration;
+        final int protocolAttemptGeneration = bleProtocolAttemptGeneration;
         bleProtocolProbePending = true;
         bleAwaitingBattery = false;
         crcKey = STANDARD_CRC_KEY;
@@ -940,9 +1034,12 @@ public class MainActivity extends Activity {
         sendRaw(pack(COMMAND_SET_CRC_KEY, int32le(SESSION_CRC_KEY ^ STANDARD_CRC_KEY), 0));
         handler.postDelayed(() -> {
             if (connectionGeneration == bleConnectionGeneration
+                    && protocolAttemptGeneration == bleProtocolAttemptGeneration
                     && bleProtocolProbePending
                     && !bleProtocolReady) {
-                failBleProtocolChannel("当前 BLE 通道没有回应 Paperang 协议");
+                failBleProtocolChannel(
+                        bleRouteLabel + " 已写入，但 "
+                                + activeNotifyLabels() + " 均未返回 Paperang 回执");
             }
         }, BLE_PROTOCOL_REPLY_TIMEOUT_MS);
     }
@@ -957,15 +1054,16 @@ public class MainActivity extends Activity {
         bleWriteRetryCount = 0;
         if (gatt != null
                 && bleFallbackWriteCharacteristic != null
-                && bleFallbackNotifyCharacteristic != null) {
+                && !bleFallbackNotifyCharacteristics.isEmpty()) {
             BluetoothGattCharacteristic fallbackWrite = bleFallbackWriteCharacteristic;
-            BluetoothGattCharacteristic fallbackNotify = bleFallbackNotifyCharacteristic;
+            List<BluetoothGattCharacteristic> fallbackNotifies =
+                    new ArrayList<>(bleFallbackNotifyCharacteristics);
             String fallbackRoute = bleFallbackRouteLabel;
             bleFallbackWriteCharacteristic = null;
-            bleFallbackNotifyCharacteristic = null;
+            bleFallbackNotifyCharacteristics.clear();
             bleFallbackRouteLabel = "";
             log("正在自动尝试备用 Paperang 通道。");
-            configureBleProtocolChannel(gatt, fallbackWrite, fallbackNotify, fallbackRoute);
+            configureBleProtocolChannel(gatt, fallbackWrite, fallbackNotifies, fallbackRoute);
             return;
         }
         BluetoothGatt failedGatt = gatt;
@@ -974,11 +1072,27 @@ public class MainActivity extends Activity {
         scheduleBleReconnect();
     }
 
-    private void handleBleNotification(byte[] value) {
+    private void dispatchBleNotification(
+            BluetoothGatt sourceGatt,
+            BluetoothGattCharacteristic characteristic,
+            byte[] value) {
+        if (sourceGatt != gatt
+                || value == null
+                || !containsCharacteristic(
+                        bleActiveNotifyCharacteristics,
+                        characteristic.getUuid())) return;
+        byte[] copy = Arrays.copyOf(value, value.length);
+        UUID sourceUuid = characteristic.getUuid();
+        handler.post(() -> handleBleNotification(sourceUuid, copy));
+    }
+
+    private void handleBleNotification(UUID sourceUuid, byte[] value) {
         if (value.length == 0) return;
-        byte[] combined = new byte[bleNotificationBuffer.length + value.length];
-        System.arraycopy(bleNotificationBuffer, 0, combined, 0, bleNotificationBuffer.length);
-        System.arraycopy(value, 0, combined, bleNotificationBuffer.length, value.length);
+        byte[] buffered = bleNotificationBuffers.get(sourceUuid);
+        if (buffered == null) buffered = new byte[0];
+        byte[] combined = new byte[buffered.length + value.length];
+        System.arraycopy(buffered, 0, combined, 0, buffered.length);
+        System.arraycopy(value, 0, combined, buffered.length, value.length);
 
         int offset = 0;
         while (offset < combined.length) {
@@ -997,17 +1111,19 @@ public class MainActivity extends Activity {
             }
             int command = combined[offset + 1] & 0xff;
             byte[] payload = Arrays.copyOfRange(combined, offset + 5, offset + 5 + payloadLength);
-            handleBleProtocolFrame(command, payload);
+            handleBleProtocolFrame(command, payload, sourceUuid);
             offset += frameLength;
         }
-        bleNotificationBuffer = offset >= combined.length
+        byte[] remaining = offset >= combined.length
                 ? new byte[0]
                 : Arrays.copyOfRange(combined, offset, combined.length);
+        bleNotificationBuffers.put(sourceUuid, remaining);
     }
 
-    private void handleBleProtocolFrame(int command, byte[] payload) {
+    private void handleBleProtocolFrame(int command, byte[] payload, UUID sourceUuid) {
         if (command == COMMAND_SET_CRC_KEY && bleProtocolProbePending) {
             bleProtocolProbePending = false;
+            bleReplyLabel = characteristicLabel(sourceUuid);
             crcKey = SESSION_CRC_KEY;
             bleAwaitingBattery = true;
             sendRaw(pack(COMMAND_DEFAULT_PARAMETERS, new byte[]{0}, 0));
@@ -1015,8 +1131,10 @@ public class MainActivity extends Activity {
             sendRaw(pack(COMMAND_SET_DENSITY, new byte[]{(byte) printDensity}, 0));
             sendRaw(pack(COMMAND_GET_BATTERY, new byte[]{1}, 0));
             final int connectionGeneration = bleConnectionGeneration;
+            final int protocolAttemptGeneration = bleProtocolAttemptGeneration;
             handler.postDelayed(() -> {
                 if (connectionGeneration == bleConnectionGeneration
+                        && protocolAttemptGeneration == bleProtocolAttemptGeneration
                         && bleAwaitingBattery
                         && !bleProtocolReady) {
                     failBleProtocolChannel("打印机没有返回电量，连接尚未真正就绪");
@@ -1027,12 +1145,15 @@ public class MainActivity extends Activity {
         if (command == COMMAND_BATTERY_STATUS && bleAwaitingBattery) {
             bleAwaitingBattery = false;
             bleProtocolReady = true;
+            bleReplyLabel = characteristicLabel(sourceUuid);
             bleReconnectAttempt = 0;
             bleReconnectScheduled = false;
             int battery = payload.length == 0 ? -1 : payload[0] & 0xff;
             String batteryText = battery < 0 ? "" : " · 电量 " + battery + "%";
-            setDeviceStatus("BLE 已连接" + batteryText, bleRouteLabel);
-            log("Paperang BLE 已完成协议验证" + batteryText + "。");
+            String verifiedRoute = bleRouteLabel + " · 回执：" + bleReplyLabel;
+            setDeviceStatus("BLE 已连接" + batteryText, verifiedRoute);
+            log("Paperang BLE 已完成协议验证，回执来自 "
+                    + bleReplyLabel + batteryText + "。");
             return;
         }
         if (command == COMMAND_FEED && blePrintPending) {
@@ -2631,18 +2752,25 @@ public class MainActivity extends Activity {
         }
         byte[] packet = bleWriteQueue.poll();
         try {
-            bleWriteCharacteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);
-            bleWriteCharacteristic.setValue(packet);
+            int writeType = bleWriteType(bleWriteCharacteristic);
             bleInFlightPacket = packet;
             bleWriting = true;
-            boolean ok = gatt.writeCharacteristic(bleWriteCharacteristic);
+            boolean ok = writeBleCharacteristic(
+                    gatt,
+                    bleWriteCharacteristic,
+                    packet,
+                    writeType);
             if (!ok) {
                 bleWriting = false;
                 retryBlePacket("BLE 写入未启动");
             } else {
+                long watchdogMs =
+                        writeType == BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                                ? BLE_NO_RESPONSE_WATCHDOG_MS
+                                : BLE_WITH_RESPONSE_WATCHDOG_MS;
                 handler.postDelayed(
                         () -> completeUnacknowledgedBleWrite(packet),
-                        BLE_WRITE_WATCHDOG_MS);
+                        watchdogMs);
             }
         } catch (SecurityException e) {
             bleWriting = false;
@@ -2650,6 +2778,29 @@ public class MainActivity extends Activity {
             bleWriteRetryCount = 0;
             log("BLE write permission denied.");
         }
+    }
+
+    private int bleWriteType(BluetoothGattCharacteristic characteristic) {
+        int properties = characteristic.getProperties();
+        if ((properties & BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0) {
+            return BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE;
+        }
+        return BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT;
+    }
+
+    @SuppressWarnings("deprecation")
+    private boolean writeBleCharacteristic(
+            BluetoothGatt targetGatt,
+            BluetoothGattCharacteristic characteristic,
+            byte[] value,
+            int writeType) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            return targetGatt.writeCharacteristic(characteristic, value, writeType)
+                    == BluetoothStatusCodes.SUCCESS;
+        }
+        characteristic.setWriteType(writeType);
+        characteristic.setValue(value);
+        return targetGatt.writeCharacteristic(characteristic);
     }
 
     private void handleBleWriteResult(int statusCode) {
@@ -2737,6 +2888,36 @@ public class MainActivity extends Activity {
 
     private String safeLabel(String value) {
         return value == null || value.length() == 0 ? "Paperang" : value;
+    }
+
+    private boolean containsCharacteristic(
+            List<BluetoothGattCharacteristic> characteristics,
+            UUID uuid) {
+        for (BluetoothGattCharacteristic characteristic : characteristics) {
+            if (characteristic.getUuid().equals(uuid)) return true;
+        }
+        return false;
+    }
+
+    private String activeNotifyLabels() {
+        StringBuilder labels = new StringBuilder();
+        for (BluetoothGattCharacteristic characteristic : bleActiveNotifyCharacteristics) {
+            if (labels.length() > 0) labels.append("/");
+            labels.append(characteristicLabel(characteristic));
+        }
+        return labels.length() == 0 ? "通知口" : labels.toString();
+    }
+
+    private String characteristicLabel(BluetoothGattCharacteristic characteristic) {
+        return characteristicLabel(characteristic.getUuid());
+    }
+
+    private String characteristicLabel(UUID uuid) {
+        if (PAPERANG_FF00_NOTIFY_UUID.equals(uuid)) return "FF01";
+        if (PAPERANG_FF00_STATUS_UUID.equals(uuid)) return "FF03";
+        if (PAPERANG_NOTIFY_UUID.equals(uuid)) return "1E4D";
+        String text = uuid.toString();
+        return text.length() >= 8 ? text.substring(4, 8).toUpperCase(Locale.ROOT) : text;
     }
 
     private void setDeviceStatus(String connection, String route) {
