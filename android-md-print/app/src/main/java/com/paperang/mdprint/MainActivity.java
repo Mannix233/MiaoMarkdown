@@ -14,9 +14,11 @@ import android.bluetooth.BluetoothProfile;
 import android.bluetooth.BluetoothSocket;
 import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanCallback;
+import android.bluetooth.le.ScanRecord;
 import android.bluetooth.le.ScanResult;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -27,6 +29,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.ParcelUuid;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
@@ -77,6 +80,10 @@ public class MainActivity extends Activity {
     private static final UUID PAPERANG_SERVICE_UUID = UUID.fromString("49535343-fe7d-4ae5-8fa9-9fafd205e455");
     private static final UUID PAPERANG_WRITE_UUID = UUID.fromString("49535343-8841-43f4-a8d4-ecbe34729bb3");
     private static final UUID PAPERANG_NOTIFY_UUID = UUID.fromString("49535343-1e4d-4bd9-ba61-23c647249616");
+    private static final UUID PAPERANG_ADVERTISING_UUID = UUID.fromString("0000fee7-0000-1000-8000-00805f9b34fb");
+    private static final UUID PAPERANG_FF00_SERVICE_UUID = UUID.fromString("0000ff00-0000-1000-8000-00805f9b34fb");
+    private static final UUID PAPERANG_FF00_WRITE_UUID = UUID.fromString("0000ff02-0000-1000-8000-00805f9b34fb");
+    private static final UUID PAPERANG_FF00_NOTIFY_UUID = UUID.fromString("0000ff01-0000-1000-8000-00805f9b34fb");
     private static final UUID CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
     private static final UUID SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805f9b34fb");
 
@@ -99,6 +106,11 @@ public class MainActivity extends Activity {
     private static final int MAX_PRINT_HEIGHT_PX = 12000;
     private static final int PREVIEW_RENDER_DEBOUNCE_MS = 110;
     private static final int MAX_BLE_WRITE_RETRIES = 3;
+    private static final int MAX_BLE_SCAN_ATTEMPTS = 3;
+    private static final int MAX_BLE_RECONNECT_ATTEMPTS = 2;
+    private static final long BLE_SCAN_WINDOW_MS = 12000L;
+    private static final long BLE_SCAN_RETRY_DELAY_MS = 1200L;
+    private static final long BLE_CONNECT_TIMEOUT_MS = 18000L;
     private static final int STANDARD_CRC_KEY = 0x35769521;
     private static final int SESSION_CRC_KEY = 0x06968634 ^ 0x002e696d;
 
@@ -130,6 +142,11 @@ public class MainActivity extends Activity {
     private BluetoothGatt gatt;
     private BluetoothGattCharacteristic bleWriteCharacteristic;
     private BluetoothLeScanner scanner;
+    private boolean bleScanInProgress = false;
+    private int bleScanAttempt = 0;
+    private int bleReconnectAttempt = 0;
+    private boolean bleReconnectScheduled = false;
+    private boolean destroyed = false;
     private BluetoothSocket classicSocket;
     private OutputStream classicOutput;
     private Markwon markwon;
@@ -159,7 +176,11 @@ public class MainActivity extends Activity {
             feedStatus.setText("出纸 " + formatMm(postPrintFeedMm) + "mm");
             showPreview();
         }
-        requestNeededPermissions();
+        if (hasRequiredBluetoothPermissions()) {
+            handler.postDelayed(this::connectPrinter, 450L);
+        } else {
+            requestNeededPermissions();
+        }
     }
 
     @Override
@@ -173,6 +194,8 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        destroyed = true;
+        handler.removeCallbacksAndMessages(null);
         closeConnections();
         super.onDestroy();
     }
@@ -324,7 +347,7 @@ public class MainActivity extends Activity {
         connectRow.setOrientation(LinearLayout.HORIZONTAL);
         connectRow.setPadding(0, 0, 0, 8);
         Button classicConnect = primaryButton("连接打印机");
-        classicConnect.setOnClickListener(v -> connectFirstPairedClassicDevice());
+        classicConnect.setOnClickListener(v -> connectPrinter());
         connectRow.addView(classicConnect, new LinearLayout.LayoutParams(-1, -2));
         root.addView(connectRow);
 
@@ -506,10 +529,33 @@ public class MainActivity extends Activity {
     }
 
     private void requestNeededPermissions() {
-        if (Build.VERSION.SDK_INT >= 31) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             requestPermissions(new String[]{
+                    Manifest.permission.BLUETOOTH_SCAN,
                     Manifest.permission.BLUETOOTH_CONNECT
             }, 10);
+        } else {
+            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, 10);
+        }
+    }
+
+    private boolean hasRequiredBluetoothPermissions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            return checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+                    && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED;
+        }
+        return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != 10) return;
+        if (hasRequiredBluetoothPermissions()) {
+            connectPrinter();
+        } else {
+            log("蓝牙扫描权限被拒绝，无法自动查找打印机。");
+            setDeviceStatus("蓝牙权限不足", "通道：无");
         }
     }
 
@@ -518,10 +564,24 @@ public class MainActivity extends Activity {
         return manager == null ? null : manager.getAdapter();
     }
 
-    private void startBleScan() {
+    private void connectPrinter() {
+        if (destroyed) return;
+        if (!hasRequiredBluetoothPermissions()) {
+            requestNeededPermissions();
+            return;
+        }
+        bleReconnectAttempt = 0;
+        bleScanAttempt = 0;
+        startBleScanAttempt();
+    }
+
+    private void startBleScanAttempt() {
+        if (destroyed) return;
+        stopBleScan();
         BluetoothAdapter adapter = bluetoothAdapter();
         if (adapter == null || !adapter.isEnabled()) {
             log("蓝牙未开启。");
+            setDeviceStatus("蓝牙未开启", "通道：无");
             return;
         }
         scanner = adapter.getBluetoothLeScanner();
@@ -529,84 +589,216 @@ public class MainActivity extends Activity {
             log("没有可用的 BLE 扫描器。");
             return;
         }
-        setDeviceStatus("正在扫描 BLE", "通道：BLE 8841");
-        log("正在扫描 BLE...");
+        bleScanAttempt++;
+        final int attempt = bleScanAttempt;
+        setDeviceStatus("正在扫描 BLE " + attempt + "/" + MAX_BLE_SCAN_ATTEMPTS, "通道：BLE");
+        log("正在扫描 Paperang BLE，第 " + attempt + " 次...");
         try {
+            bleScanInProgress = true;
             scanner.startScan(scanCallback);
-            handler.postDelayed(() -> {
-                try {
-                    scanner.stopScan(scanCallback);
-                } catch (SecurityException ignored) {
-                }
-            }, 12000);
+            handler.postDelayed(() -> handleBleScanTimeout(attempt), BLE_SCAN_WINDOW_MS);
         } catch (SecurityException e) {
+            bleScanInProgress = false;
             log("BLE 扫描权限被拒绝。");
+            requestNeededPermissions();
         }
+    }
+
+    private void handleBleScanTimeout(int attempt) {
+        if (!bleScanInProgress || attempt != bleScanAttempt || destroyed) return;
+        stopBleScan();
+        if (bleScanAttempt < MAX_BLE_SCAN_ATTEMPTS) {
+            log("暂时没有收到 P1 广播，稍后自动重试。");
+            handler.postDelayed(this::startBleScanAttempt, BLE_SCAN_RETRY_DELAY_MS);
+            return;
+        }
+        log("BLE 多次扫描未发现 P1，尝试已配对的经典蓝牙。");
+        setDeviceStatus("未发现 BLE 广播", "通道：SPP 兜底");
+        connectFirstPairedClassicDevice();
+    }
+
+    private void stopBleScan() {
+        if (scanner != null && bleScanInProgress) {
+            try {
+                scanner.stopScan(scanCallback);
+            } catch (SecurityException ignored) {
+            }
+        }
+        bleScanInProgress = false;
     }
 
     private final ScanCallback scanCallback = new ScanCallback() {
         @Override
         public void onScanResult(int callbackType, ScanResult result) {
+            if (!bleScanInProgress || !isPaperangScanResult(result)) return;
             BluetoothDevice device = result.getDevice();
             String name = safeDeviceName(device);
-            if (isPaperangName(name)) {
-                try {
-                    scanner.stopScan(this);
-                } catch (SecurityException ignored) {
+            stopBleScan();
+            log("找到 BLE 设备：" + safeLabel(name) + " " + safeAddress(device));
+            setDeviceStatus("找到：" + safeLabel(name), "通道：BLE");
+            connectBleDevice(device);
+        }
+
+        @Override
+        public void onScanFailed(int errorCode) {
+            handler.post(() -> {
+                if (destroyed) return;
+                bleScanInProgress = false;
+                log("BLE 扫描失败：" + errorCode + "，正在重试。");
+                if (bleScanAttempt < MAX_BLE_SCAN_ATTEMPTS) {
+                    handler.postDelayed(MainActivity.this::startBleScanAttempt, BLE_SCAN_RETRY_DELAY_MS);
+                } else {
+                    connectFirstPairedClassicDevice();
                 }
-                log("找到 BLE 设备：" + name + " " + safeAddress(device));
-                setDeviceStatus("找到：" + safeLabel(name), "通道：BLE 8841");
-                connectBleDevice(device);
-            }
+            });
         }
     };
 
+    private boolean isPaperangScanResult(ScanResult result) {
+        BluetoothDevice device = result.getDevice();
+        ScanRecord record = result.getScanRecord();
+        String name = safeDeviceName(device);
+        if (name.length() == 0 && record != null) name = record.getDeviceName();
+        if (isPaperangName(name)) return true;
+        if (record == null || record.getServiceUuids() == null) return false;
+        for (ParcelUuid service : record.getServiceUuids()) {
+            UUID uuid = service.getUuid();
+            if (PAPERANG_ADVERTISING_UUID.equals(uuid)
+                    || PAPERANG_SERVICE_UUID.equals(uuid)
+                    || PAPERANG_FF00_SERVICE_UUID.equals(uuid)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void connectBleDevice(BluetoothDevice device) {
         closeClassic();
-        if (gatt != null) {
-            gatt.close();
-            gatt = null;
-        }
+        closeGattConnection(gatt);
         log("正在连接 BLE...");
-        setDeviceStatus("BLE 连接中", "通道：BLE 8841");
+        setDeviceStatus("BLE 连接中", "通道：BLE");
         try {
-            gatt = device.connectGatt(this, false, gattCallback);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                gatt = device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE);
+            } else {
+                gatt = device.connectGatt(this, false, gattCallback);
+            }
+            final BluetoothGatt pendingGatt = gatt;
+            handler.postDelayed(() -> {
+                if (!destroyed && gatt == pendingGatt && bleWriteCharacteristic == null) {
+                    log("BLE 连接或服务发现超时，正在重新扫描。");
+                    closeGattConnection(pendingGatt);
+                    scheduleBleReconnect();
+                }
+            }, BLE_CONNECT_TIMEOUT_MS);
         } catch (SecurityException e) {
             log("BLE 连接权限被拒绝。");
+            requestNeededPermissions();
+        }
+    }
+
+    private void scheduleBleReconnect() {
+        handler.post(() -> {
+            if (destroyed || readySilently() || bleReconnectScheduled) return;
+            if (bleReconnectAttempt >= MAX_BLE_RECONNECT_ATTEMPTS) {
+                log("BLE 自动重连仍未成功，请短按打印机电源键唤醒广播后重试。");
+                setDeviceStatus("BLE 重连失败", "通道：无");
+                return;
+            }
+            bleReconnectAttempt++;
+            bleReconnectScheduled = true;
+            bleScanAttempt = 0;
+            long delay = BLE_SCAN_RETRY_DELAY_MS * bleReconnectAttempt;
+            setDeviceStatus("BLE 自动重连 " + bleReconnectAttempt + "/" + MAX_BLE_RECONNECT_ATTEMPTS, "通道：BLE");
+            handler.postDelayed(() -> {
+                bleReconnectScheduled = false;
+                startBleScanAttempt();
+            }, delay);
+        });
+    }
+
+    private void closeGattConnection(BluetoothGatt target) {
+        if (target == null) return;
+        if (gatt == target) {
+            gatt = null;
+            bleWriteCharacteristic = null;
+            bleWriteQueue.clear();
+            bleWriting = false;
+            bleInFlightPacket = null;
+            bleWriteRetryCount = 0;
+        }
+        try {
+            target.disconnect();
+        } catch (Exception ignored) {
+        }
+        try {
+            target.close();
+        } catch (Exception ignored) {
         }
     }
 
     private final BluetoothGattCallback gattCallback = new BluetoothGattCallback() {
         @Override
         public void onConnectionStateChange(BluetoothGatt g, int statusCode, int newState) {
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
+            if (g != gatt) {
+                closeGattConnection(g);
+                return;
+            }
+            if (statusCode == BluetoothGatt.GATT_SUCCESS
+                    && newState == BluetoothProfile.STATE_CONNECTED) {
                 log("BLE 已连接，正在发现服务...");
-                setDeviceStatus("BLE 已连接", "通道：BLE 8841");
+                setDeviceStatus("BLE 已连接", "通道：BLE");
                 try {
-                    g.discoverServices();
+                    if (!g.discoverServices()) {
+                        log("BLE 服务发现未启动，正在重新扫描。");
+                        closeGattConnection(g);
+                        scheduleBleReconnect();
+                    }
                 } catch (SecurityException e) {
                     log("BLE 服务发现权限被拒绝。");
+                    closeGattConnection(g);
                 }
             } else {
                 log("BLE 已断开：" + statusCode);
                 setDeviceStatus("BLE 已断开", "通道：无");
+                closeGattConnection(g);
+                scheduleBleReconnect();
             }
         }
 
         @Override
         public void onServicesDiscovered(BluetoothGatt g, int statusCode) {
+            if (g != gatt) return;
+            if (statusCode != BluetoothGatt.GATT_SUCCESS) {
+                log("BLE 服务发现失败：" + statusCode + "，正在重新扫描。");
+                closeGattConnection(g);
+                scheduleBleReconnect();
+                return;
+            }
             BluetoothGattService service = g.getService(PAPERANG_SERVICE_UUID);
-            if (service == null) {
-                log("没有找到 Paperang BLE 服务。");
-                return;
+            BluetoothGattCharacteristic notify = null;
+            String route = "写入：8841";
+            if (service != null) {
+                bleWriteCharacteristic = service.getCharacteristic(PAPERANG_WRITE_UUID);
+                notify = service.getCharacteristic(PAPERANG_NOTIFY_UUID);
             }
-            bleWriteCharacteristic = service.getCharacteristic(PAPERANG_WRITE_UUID);
             if (bleWriteCharacteristic == null) {
-                log("没有找到 BLE 写入特征。");
+                service = g.getService(PAPERANG_FF00_SERVICE_UUID);
+                if (service != null) {
+                    bleWriteCharacteristic = service.getCharacteristic(PAPERANG_FF00_WRITE_UUID);
+                    notify = service.getCharacteristic(PAPERANG_FF00_NOTIFY_UUID);
+                    route = "写入：FF02";
+                }
+            }
+            if (bleWriteCharacteristic == null) {
+                log("没有找到 Paperang 4953/FF00 写入特征，正在重新扫描。");
+                closeGattConnection(g);
+                scheduleBleReconnect();
                 return;
             }
-            setDeviceStatus("BLE 就绪", "写入：8841");
-            BluetoothGattCharacteristic notify = service.getCharacteristic(PAPERANG_NOTIFY_UUID);
+            bleReconnectAttempt = 0;
+            bleReconnectScheduled = false;
+            setDeviceStatus("BLE 就绪", route);
             if (notify != null) {
                 try {
                     g.setCharacteristicNotification(notify, true);
@@ -624,12 +816,14 @@ public class MainActivity extends Activity {
 
         @Override
         public void onCharacteristicWrite(BluetoothGatt g, BluetoothGattCharacteristic c, int statusCode) {
+            if (g != gatt) return;
             handler.post(() -> handleBleWriteResult(statusCode));
         }
 
         @Override
         public void onCharacteristicChanged(BluetoothGatt g, BluetoothGattCharacteristic c) {
             byte[] value = c.getValue();
+            if (value == null) return;
             int command = value.length > 1 ? value[1] & 0xff : -1;
             log("BLE 通知 cmd=" + command);
         }
@@ -2305,18 +2499,9 @@ public class MainActivity extends Activity {
     }
 
     private void closeBle() {
-        if (gatt != null) {
-            try {
-                gatt.close();
-            } catch (Exception ignored) {
-            }
-            gatt = null;
-            bleWriteCharacteristic = null;
-            bleWriteQueue.clear();
-            bleWriting = false;
-            bleInFlightPacket = null;
-            bleWriteRetryCount = 0;
-        }
+        stopBleScan();
+        bleReconnectScheduled = false;
+        closeGattConnection(gatt);
     }
 
     private void closeClassic() {
